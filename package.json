@@ -1,0 +1,10 @@
+{
+  "name": "rss-feed-merger",
+  "version": "1.0.0",
+  "description": "Merges RSS feeds",
+  "main": "final-rss-merger.js",
+  "dependencies": {},
+  "scripts": {
+    "update": "node final-rss-merger.js"
+  }
+}
