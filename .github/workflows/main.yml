@@ -1,0 +1,35 @@
+name: Update RSS Feed
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'  # Run every 6 hours
+  workflow_dispatch:  # Allow manual runs too
+
+jobs:
+  update-feed:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+          
+      - name: Update feed
+        run: |
+          # Update the self-reference URL in the script
+          sed -i 's|const selfReferenceUrl = ".*"|const selfReferenceUrl = "https://YOUR-USERNAME.github.io/rss-feed-merger/merged_rss_feed.xml"|' final-rss-merger.js
+          # Replace YOUR-USERNAME with your actual GitHub username
+          sed -i "s/YOUR-USERNAME/$(echo $GITHUB_REPOSITORY | cut -d'/' -f1)/" final-rss-merger.js
+          
+          # Run the script
+          node final-rss-merger.js
+          
+      - name: Commit and push if changed
+        run: |
+          git config --global user.name 'GitHub Actions'
+          git config --global user.email 'actions@github.com'
+          git add merged_rss_feed.xml
+          git commit -m "Update RSS feed" || exit 0
+          git push
