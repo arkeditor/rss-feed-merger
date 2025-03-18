@@ -1,8 +1,11 @@
 /**
- * Minimal RSS Feed Merger
+ * Direct XML Link Replacement
  * 
- * A completely different approach focused only on link replacement
- * with no possibility of duplicates.
+ * This script takes a brute-force approach:
+ * 1. Only keep items from the primary feed
+ * 2. For each item, search for a matching title in the secondary feed
+ * 3. If found, directly replace the link text
+ * 4. Drop all non-matching items 
  */
 
 const https = require('https');
@@ -34,151 +37,167 @@ function fetchURL(url) {
   });
 }
 
+// Clean title for comparison
+function cleanTitle(title) {
+  return title.trim()
+    .replace(/\s+/g, ' ')          // Normalize whitespace
+    .replace(/[^\w\s]/g, '')       // Remove punctuation
+    .toLowerCase();                 // Convert to lowercase
+}
+
 // Main function
-async function processFeedsAndCreateNew() {
+async function mergeFeeds() {
   try {
     console.log('Fetching feeds...');
     const primaryFeedXML = await fetchURL(PRIMARY_FEED_URL);
     const secondaryFeedXML = await fetchURL(SECONDARY_FEED_URL);
     
-    // Step 1: Extract only the channel content (everything between <channel> and </channel>)
-    const primaryChannelMatch = primaryFeedXML.match(/<channel>([\s\S]*?)<\/channel>/);
-    const secondaryChannelMatch = secondaryFeedXML.match(/<channel>([\s\S]*?)<\/channel>/);
+    // Extract the header (everything before the first item)
+    const primaryHeaderMatch = primaryFeedXML.match(/([\s\S]*?)<item>/);
+    let headerXML = primaryHeaderMatch ? primaryHeaderMatch[1] : '';
     
-    if (!primaryChannelMatch || !secondaryChannelMatch) {
-      throw new Error('Could not extract channel content from feeds');
-    }
+    // Fix self-reference link in header
+    headerXML = headerXML.replace(
+      /<atom:link[^>]*rel="self"[^>]*\/>/,
+      '<atom:link href="https://arkeditor.github.io/rss-feed-merger/merged_rss_feed.xml" rel="self" type="application/rss+xml"/>'
+    );
     
-    const primaryChannel = primaryChannelMatch[1];
-    const secondaryChannel = secondaryChannelMatch[1];
+    // Extract the footer (everything after the last item)
+    const primaryFooterMatch = primaryFeedXML.match(/<\/item>\s*([\s\S]*?)$/);
+    const footerXML = primaryFooterMatch ? primaryFooterMatch[1] : '</channel>\n</rss>';
     
-    // Step 2: Extract header (everything before the first <item>)
-    const headerMatch = primaryChannel.match(/([\s\S]*?)<item>/);
-    const header = headerMatch ? headerMatch[1] : '';
+    // Extract all items from primary feed
+    const primaryItemsMatches = [...primaryFeedXML.matchAll(/<item>([\s\S]*?)<\/item>/g)];
+    const primaryItems = primaryItemsMatches.map(match => match[0]);
     
-    // Step 3: Extract individual items from both feeds
-    const primaryItemRegex = /<item>([\s\S]*?)<\/item>/g;
-    const secondaryItemRegex = /<item>([\s\S]*?)<\/item>/g;
-    
-    const primaryItems = [];
-    const secondaryItems = [];
-    
-    let primaryMatch;
-    while ((primaryMatch = primaryItemRegex.exec(primaryChannel)) !== null) {
-      primaryItems.push(primaryMatch[1]);
-    }
-    
-    let secondaryMatch;
-    while ((secondaryMatch = secondaryItemRegex.exec(secondaryChannel)) !== null) {
-      secondaryItems.push(secondaryMatch[1]);
-    }
+    // Extract all items from secondary feed
+    const secondaryItemsMatches = [...secondaryFeedXML.matchAll(/<item>([\s\S]*?)<\/item>/g)];
+    const secondaryItems = secondaryItemsMatches.map(match => match[0]);
     
     console.log(`Found ${primaryItems.length} items in primary feed`);
     console.log(`Found ${secondaryItems.length} items in secondary feed`);
     
-    // Step 4: Index secondary items by title for faster matching
-    const secondaryItemsByTitle = {};
+    // Build a map of titles to secondary links
+    const secondaryLinksByTitle = {};
+    
     for (const item of secondaryItems) {
-      const titleMatch = item.match(/<title>([\s\S]*?)<\/title>/);
-      if (titleMatch) {
-        const title = titleMatch[1].trim();
-        secondaryItemsByTitle[title] = item;
-      }
-    }
-    
-    // Step 5: Create a secondary link lookup
-    const secondaryLinks = {};
-    for (const item of secondaryItems) {
-      const titleMatch = item.match(/<title>([\s\S]*?)<\/title>/);
-      const linkMatch = item.match(/<link>([\s\S]*?)<\/link>/);
-      
-      if (titleMatch && linkMatch) {
-        const title = titleMatch[1].trim();
-        const link = linkMatch[1].trim();
-        
-        // Only store links from newsmemory
-        if (link.includes('newsmemory.com')) {
-          secondaryLinks[title] = link;
-        }
-      }
-    }
-    
-    // Step 6: Process primary items, replacing links with secondary links when possible
-    const processedItems = [];
-    const processedTitles = new Set(); // For deduplication
-    
-    for (const item of primaryItems) {
-      const titleMatch = item.match(/<title>([\s\S]*?)<\/title>/);
+      // Extract title - handle CDATA properly
+      const titleMatch = item.match(/<title>\s*(?:<!\[CDATA\[(.*?)\]\]>|([^<]*))\s*<\/title>/s);
       if (!titleMatch) continue;
       
-      const title = titleMatch[1].trim();
+      const titleContent = titleMatch[1] || titleMatch[2];
+      if (!titleContent) continue;
+      
+      const cleanedTitle = cleanTitle(titleContent);
+      
+      // Extract link (only keep links to newsmemory)
+      const linkMatch = item.match(/<link>\s*(.*?)\s*<\/link>/s);
+      if (!linkMatch) continue;
+      
+      const link = linkMatch[1].trim();
+      if (!link.includes('newsmemory.com')) continue;
+      
+      secondaryLinksByTitle[cleanedTitle] = link;
+    }
+    
+    console.log(`Found ${Object.keys(secondaryLinksByTitle).length} unique titles with newsmemory links`);
+    
+    // Process primary items
+    let mergedFeedXML = headerXML;
+    const processedTitles = new Set();
+    let matchCount = 0;
+    
+    for (const item of primaryItems) {
+      // Extract title
+      const titleMatch = item.match(/<title>\s*(?:<!\[CDATA\[(.*?)\]\]>|([^<]*))\s*<\/title>/s);
+      if (!titleMatch) continue;
+      
+      const titleContent = titleMatch[1] || titleMatch[2];
+      if (!titleContent) continue;
+      
+      const cleanedTitle = cleanTitle(titleContent);
       
       // Skip duplicates
-      if (processedTitles.has(title)) {
-        console.log(`Skipping duplicate: "${title}"`);
+      if (processedTitles.has(cleanedTitle)) {
+        console.log(`Skipping duplicate: "${titleContent.trim()}"`);
         continue;
       }
       
-      processedTitles.add(title);
-      
-      // Check if we have a matching link in the secondary feed
-      const secondaryLink = secondaryLinks[title];
+      // Check if we have a matching link
+      const secondaryLink = secondaryLinksByTitle[cleanedTitle];
       
       if (secondaryLink) {
         // Replace the link in the item
         let modifiedItem = item;
         
-        // First, remove any existing link tags
-        modifiedItem = modifiedItem.replace(/<link>[\s\S]*?<\/link>/g, '');
+        // Check if the item has a link tag
+        const hasLink = /<link>[\s\S]*?<\/link>/i.test(modifiedItem);
         
-        // Then add the secondary link after the title
-        modifiedItem = modifiedItem.replace(/<\/title>/, '</title>\n  <link>' + secondaryLink + '</link>');
+        if (hasLink) {
+          // Replace existing link - using regex with lookahead/lookbehind to ensure we get the whole tag
+          modifiedItem = modifiedItem.replace(
+            /<link>[\s\S]*?<\/link>/i,
+            `<link>\n${secondaryLink}\n</link>`
+          );
+        } else {
+          // Add a link tag after the title
+          modifiedItem = modifiedItem.replace(
+            /<\/title>/,
+            `</title>\n  <link>${secondaryLink}</link>`
+          );
+        }
         
-        processedItems.push(modifiedItem);
-        console.log(`✓ Replaced link for: "${title}"`);
+        // Add to merged feed
+        mergedFeedXML += modifiedItem;
+        processedTitles.add(cleanedTitle);
+        matchCount++;
+        
+        console.log(`✓ Added item with secondary link: "${titleContent.trim()}"`);
       } else {
-        // Skip items without a match in the secondary feed
-        console.log(`✗ No secondary link found for: "${title}"`);
+        console.log(`✗ No secondary link for: "${titleContent.trim()}"`);
       }
     }
     
-    console.log(`\nCreated ${processedItems.length} items with secondary links`);
+    // Add footer
+    mergedFeedXML += footerXML;
     
-    // Step 7: Build the final XML feed
-    let newFeedXML = '<?xml version="1.0" encoding="UTF-8"?>\n';
-    newFeedXML += '<rss xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:content="http://purl.org/rss/1.0/modules/content/" xmlns:atom="http://www.w3.org/2005/Atom" version="2.0">\n';
-    newFeedXML += '<channel>\n';
+    console.log(`\nCompleted merge with ${matchCount} items`);
     
-    // Add header with updated self-reference
-    let updatedHeader = header.replace(
-      /<atom:link[^>]*rel="self"[^>]*\/>/,
-      '<atom:link href="https://arkeditor.github.io/rss-feed-merger/merged_rss_feed.xml" rel="self" type="application/rss+xml"/>'
-    );
+    // Perform one final verification to ensure no duplicate items
+    const finalItemsMatches = [...mergedFeedXML.matchAll(/<item>([\s\S]*?)<\/item>/g)];
+    const finalItems = finalItemsMatches.map(match => match[0]);
     
-    newFeedXML += updatedHeader;
+    console.log(`Final feed contains ${finalItems.length} items`);
     
-    // Add all processed items
-    for (const item of processedItems) {
-      newFeedXML += '<item>\n' + item + '\n</item>\n';
+    // Check that all links are from newsmemory
+    const linkPatterns = finalItems.map(item => {
+      const linkMatch = item.match(/<link>\s*(.*?)\s*<\/link>/s);
+      return linkMatch ? linkMatch[1].trim() : null;
+    }).filter(Boolean);
+    
+    const nonNewsmemoryLinks = linkPatterns.filter(link => !link.includes('newsmemory.com'));
+    
+    if (nonNewsmemoryLinks.length > 0) {
+      console.log(`Warning: Found ${nonNewsmemoryLinks.length} links not from newsmemory.com`);
+    } else {
+      console.log('All links are from newsmemory.com: PASSED');
     }
     
-    // Close the tags
-    newFeedXML += '</channel>\n</rss>';
-    
     // Save the output to a file
-    fs.writeFileSync('merged_rss_feed.xml', newFeedXML);
+    fs.writeFileSync('merged_rss_feed.xml', mergedFeedXML);
     console.log(`\nMerged feed saved to merged_rss_feed.xml`);
     
-    return newFeedXML;
+    return mergedFeedXML;
   } catch (error) {
     console.error('Error:', error.message);
+    console.error(error.stack);
     throw error;
   }
 }
 
 // Run the script
-console.log('Starting minimal RSS feed merger...');
-processFeedsAndCreateNew().then(() => {
+console.log('Starting direct XML link replacement...');
+mergeFeeds().then(() => {
   console.log('Script completed successfully!');
 }).catch(err => {
   console.error('Script failed with error:', err);
