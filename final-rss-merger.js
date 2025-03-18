@@ -1,6 +1,8 @@
 /**
- * Final RSS Feed Merger Script
- * Fixed validation issues with namespaces and self-reference
+ * Final RSS Feed Merger Script (with Image Preservation)
+ * 
+ * This script merges two RSS feeds, preserving all content including images
+ * from the primary feed but using links from the secondary feed.
  */
 
 const https = require('https');
@@ -106,6 +108,20 @@ async function processFeedsAndCreateNew() {
     console.log('Fetching secondary feed...');
     const secondaryFeedXML = await fetchURL(SECONDARY_FEED_URL);
     
+    // Extract the XML declaration, RSS tag, and channel opening content
+    const headerMatch = primaryFeedXML.match(/([\s\S]*?)<item>/);
+    let header = headerMatch ? headerMatch[1] : '<?xml version="1.0" encoding="UTF-8"?>\n<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">\n<channel>\n';
+    
+    // Update the self-reference link
+    header = header.replace(
+      /<atom:link[^>]*rel="self"[^>]*\/>/,
+      `<atom:link href="https://arkeditor.github.io/rss-feed-merger/merged_rss_feed.xml" rel="self" type="application/rss+xml"/>`
+    );
+    
+    // Get the closing tags
+    const footerMatch = primaryFeedXML.match(/<\/item>([\s\S]*?)$/);
+    const footer = footerMatch ? footerMatch[1] : '</channel>\n</rss>';
+    
     console.log('Extracting items from feeds...');
     const primaryItems = extractItems(primaryFeedXML);
     const secondaryItems = extractItems(secondaryFeedXML);
@@ -113,25 +129,15 @@ async function processFeedsAndCreateNew() {
     console.log(`Primary feed has ${primaryItems.length} items`);
     console.log(`Secondary feed has ${secondaryItems.length} items`);
     
-    // Create a new feed
-    // FIX: Added proper namespace declarations for both atom and dc
-    let newFeedXML = '<?xml version="1.0" encoding="UTF-8"?>\n';
-    newFeedXML += '<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">\n';
-    newFeedXML += '<channel>\n';
-    newFeedXML += '  <title>The Ark Newspaper</title>\n';
-    newFeedXML += '  <description>Merged RSS Feed</description>\n';
-    newFeedXML += '  <link>https://www.thearknewspaper.com</link>\n';
-    // Note: When deploying, change this URL to match your actual hosting location
-    const selfReferenceUrl = "http://example.com/merged_rss_feed.xml"; // Use generic placeholder
-    newFeedXML += `  <atom:link href="${selfReferenceUrl}" rel="self" type="application/rss+xml"/>\n`;
-    
+    // Start building the new feed
+    let newFeedXML = header;
     let matchedCount = 0;
     
     console.log('\nMatching items...');
     
     // Process each item
     for (let i = 0; i < primaryItems.length; i++) {
-      const primaryItem = primaryItems[i];
+      let primaryItem = primaryItems[i];
       
       const primaryTitle = extractTagValue(primaryItem, 'title');
       const primaryCreator = extractCreator(primaryItem);
@@ -175,69 +181,34 @@ async function processFeedsAndCreateNew() {
         if (titleMatch && (creatorMatch || !secondaryCreator || !primaryCreator)) {
           matchFound = true;
           matchedSecondaryLink = secondaryLink;
-          console.log(`  ✓ Match found! Using link: ${secondaryLink}`);
+          console.log(`  ‚úì Match found! Using link: ${matchedSecondaryLink}`);
           break;
         }
       }
       
       if (matchFound && matchedSecondaryLink) {
-        // Generate a unique ID
-        const uniqueId = generateUniqueId(i);
+        // Replace only the link tag, keeping everything else the same
+        // This preserves all image and media tags
+        const linkRegex = /<link>(.*?)<\/link>/;
         
-        // Build a new item
-        let newItem = '  <item>\n';
-        
-        // Add title (preserve CDATA if present)
-        if (primaryTitle.includes('<![CDATA[')) {
-          newItem += `    <title>${primaryTitle}</title>\n`;
+        if (linkRegex.test(primaryItem)) {
+          // Replace existing link
+          primaryItem = primaryItem.replace(linkRegex, `<link>${matchedSecondaryLink}</link>`);
         } else {
-          newItem += `    <title><![CDATA[${primaryTitle}]]></title>\n`;
+          // Add link if it doesn't exist (should be rare)
+          primaryItem = primaryItem.replace(/<\/item>/, `<link>${matchedSecondaryLink}</link>\n</item>`);
         }
         
-        // Add link
-        newItem += `    <link>${matchedSecondaryLink}</link>\n`;
-        
-        // Add description if available
-        const primaryDescription = extractTagValue(primaryItem, 'description');
-        if (primaryDescription) {
-          if (primaryDescription.includes('<![CDATA[')) {
-            newItem += `    <description>${primaryDescription}</description>\n`;
-          } else {
-            newItem += `    <description><![CDATA[${primaryDescription}]]></description>\n`;
-          }
-        }
-        
-        // Add creator if available
-        if (primaryCreator) {
-          if (primaryCreator.includes('<![CDATA[')) {
-            newItem += `    <dc:creator>${primaryCreator}</dc:creator>\n`;
-          } else {
-            newItem += `    <dc:creator><![CDATA[${primaryCreator}]]></dc:creator>\n`;
-          }
-        }
-        
-        // Add pubDate if available
-        const primaryPubDate = extractTagValue(primaryItem, 'pubDate');
-        if (primaryPubDate) {
-          newItem += `    <pubDate>${primaryPubDate}</pubDate>\n`;
-        }
-        
-        // Add our unique GUID
-        newItem += `    <guid isPermaLink="false">${uniqueId}</guid>\n`;
-        
-        // Close the item
-        newItem += '  </item>\n';
-        
-        // Add to feed
-        newFeedXML += newItem;
+        // Add the modified item to the new feed
+        newFeedXML += primaryItem;
         matchedCount++;
       } else {
-        console.log(`  ✗ No match found - excluding from output`);
+        console.log(`  ‚úó No match found - excluding from output`);
       }
     }
     
-    // Close the channel and rss tags
-    newFeedXML += '</channel>\n</rss>';
+    // Finish the new feed
+    newFeedXML += footer;
     
     console.log(`\nMatching complete: ${matchedCount} of ${primaryItems.length} items matched`);
     
