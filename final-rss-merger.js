@@ -1,11 +1,15 @@
 /**
- * Improved RSS Feed Merger
+ * Enhanced RSS Feed Merger with Post-Processing Verification
  * 
- * This script merges two RSS feeds:
- * 1. It uses the primary feed for all metadata and content
- * 2. It replaces links with those from the secondary feed when available
- * 3. Prevents duplicate items
- * 4. Only includes items with newsmemory.com links
+ * This script strictly enforces the following rules:
+ * 1. Only include items from the primary feed structure
+ * 2. Replace links with those from the secondary feed when available
+ * 3. Filter out duplicates by normalized title
+ * 4. Only include items with newsmemory.com links
+ * 5. Completely remove any items that don't have newsmemory.com links
+ * 6. Post-process the feed to catch and fix any remaining issues:
+ *    - Remove any items still containing thearknewspaper.com links
+ *    - Check for and remove duplicate titles, keeping only newsmemory.com versions
  */
 
 const https = require('https');
@@ -39,6 +43,7 @@ function fetchURL(url) {
 
 // Clean title for comparison
 function cleanTitle(title) {
+  if (!title) return '';
   return title.trim()
     .replace(/\s+/g, ' ')          // Normalize whitespace
     .replace(/[^\w\s]/g, '')       // Remove punctuation
@@ -56,6 +61,24 @@ function extractTitle(item) {
   return titleContent.trim();
 }
 
+// Check if an item has a link to newsmemory
+function hasNewsmemoryLink(item) {
+  const linkMatch = item.match(/<link>\s*(.*?)\s*<\/link>/s);
+  if (!linkMatch) return false;
+  
+  const link = linkMatch[1].trim();
+  return link.includes('newsmemory.com');
+}
+
+// Check if an item has a link to thearknewspaper.com
+function hasArkLink(item) {
+  const linkMatch = item.match(/<link>\s*(.*?)\s*<\/link>/s);
+  if (!linkMatch) return false;
+  
+  const link = linkMatch[1].trim();
+  return link.includes('thearknewspaper.com');
+}
+
 // Extract link from an item
 function extractLink(item) {
   const linkMatch = item.match(/<link>\s*(.*?)\s*<\/link>/s);
@@ -64,11 +87,27 @@ function extractLink(item) {
   return linkMatch[1].trim();
 }
 
+// Extract GUID from an item
+function extractGuid(item) {
+  const guidMatch = item.match(/<guid[^>]*>(.*?)<\/guid>/s);
+  return guidMatch ? guidMatch[1].trim() : null;
+}
+
+// Extract items from XML content
+function extractItems(xmlContent) {
+  const itemMatches = [...xmlContent.matchAll(/<item>([\s\S]*?)<\/item>/g)];
+  return itemMatches.map(match => match[0]);
+}
+
 // Main function
 async function mergeFeeds() {
   try {
-    console.log('Fetching feeds...');
+    console.log('Starting enhanced feed merger...');
+    
+    console.log('Fetching primary feed...');
     const primaryFeedXML = await fetchURL(PRIMARY_FEED_URL);
+    
+    console.log('Fetching secondary feed...');
     const secondaryFeedXML = await fetchURL(SECONDARY_FEED_URL);
     
     // Extract the header (everything before the first item)
@@ -85,18 +124,14 @@ async function mergeFeeds() {
     const primaryFooterMatch = primaryFeedXML.match(/<\/item>\s*([\s\S]*?)$/);
     const footerXML = primaryFooterMatch ? primaryFooterMatch[1] : '</channel>\n</rss>';
     
-    // Extract all items from primary feed
-    const primaryItemsMatches = [...primaryFeedXML.matchAll(/<item>([\s\S]*?)<\/item>/g)];
-    const primaryItems = primaryItemsMatches.map(match => match[0]);
-    
-    // Extract all items from secondary feed
-    const secondaryItemsMatches = [...secondaryFeedXML.matchAll(/<item>([\s\S]*?)<\/item>/g)];
-    const secondaryItems = secondaryItemsMatches.map(match => match[0]);
+    // Extract all items from both feeds
+    const primaryItems = extractItems(primaryFeedXML);
+    const secondaryItems = extractItems(secondaryFeedXML);
     
     console.log(`Found ${primaryItems.length} items in primary feed`);
     console.log(`Found ${secondaryItems.length} items in secondary feed`);
     
-    // Build a map of titles to secondary links
+    // Build a map of cleaned titles to secondary feed links
     const secondaryLinksByTitle = {};
     
     for (const item of secondaryItems) {
@@ -114,26 +149,36 @@ async function mergeFeeds() {
     
     console.log(`Found ${Object.keys(secondaryLinksByTitle).length} unique titles with newsmemory links`);
     
-    // Process primary items
-    let mergedFeedXML = headerXML;
-    const processedTitles = new Set();
-    let matchCount = 0;
+    // Process primary items - first group by title to eliminate duplicates
+    const titleToItem = {};
+    const processedGuids = new Set();
     
-    // First pass: Group items by title to avoid duplicates
-    const primaryItemsByTitle = {};
     for (const item of primaryItems) {
       const title = extractTitle(item);
       if (!title) continue;
       
       const cleanedTitle = cleanTitle(title);
-      if (!primaryItemsByTitle[cleanedTitle]) {
-        primaryItemsByTitle[cleanedTitle] = item;
+      
+      // Extract GUID to avoid duplicates
+      const guid = extractGuid(item);
+      
+      // Skip if we've already seen this GUID
+      if (guid && processedGuids.has(guid)) continue;
+      if (guid) processedGuids.add(guid);
+      
+      // Only keep the first occurrence of each title
+      if (!titleToItem[cleanedTitle]) {
+        titleToItem[cleanedTitle] = item;
       }
     }
     
-    // Second pass: Process each unique primary item
-    for (const [cleanedTitle, item] of Object.entries(primaryItemsByTitle)) {
-      // Check if we have a matching link
+    console.log(`Reduced to ${Object.keys(titleToItem).length} unique items from primary feed`);
+    
+    // Now replace links with newsmemory links where available
+    const finalItems = [];
+    let matchCount = 0;
+    
+    for (const [cleanedTitle, item] of Object.entries(titleToItem)) {
       const secondaryLink = secondaryLinksByTitle[cleanedTitle];
       
       if (secondaryLink) {
@@ -144,10 +189,10 @@ async function mergeFeeds() {
         const hasLink = /<link>[\s\S]*?<\/link>/i.test(modifiedItem);
         
         if (hasLink) {
-          // Replace existing link - using regex with lookahead/lookbehind to ensure we get the whole tag
+          // Replace existing link with the secondary link
           modifiedItem = modifiedItem.replace(
-            /<link>[\s\S]*?<\/link>/i,
-            `<link>${secondaryLink}</link>`
+            /<link>\s*[\s\S]*?\s*<\/link>/i,
+            `<link>\n${secondaryLink}\n</link>`
           );
         } else {
           // Add a link tag after the title
@@ -157,63 +202,156 @@ async function mergeFeeds() {
           );
         }
         
-        // Add to merged feed
-        mergedFeedXML += modifiedItem;
+        finalItems.push(modifiedItem);
         matchCount++;
         
         const title = extractTitle(item);
-        console.log(`✓ Added item with secondary link: "${title}"`);
+        console.log(`✓ Added item with newsmemory link: "${title}"`);
       } else {
         const title = extractTitle(item);
-        console.log(`✗ No secondary link for: "${title}"`);
+        console.log(`✗ No newsmemory link for: "${title}" - SKIPPING`);
       }
     }
     
-    // Add footer
+    // Build the initial merged XML
+    let mergedFeedXML = headerXML;
+    for (const item of finalItems) {
+      mergedFeedXML += item;
+    }
     mergedFeedXML += footerXML;
     
-    console.log(`\nCompleted merge with ${matchCount} items`);
+    console.log(`\nCompleted initial merge with ${matchCount} items`);
     
-    // Perform verification to ensure all links are from newsmemory
-    const finalItemsMatches = [...mergedFeedXML.matchAll(/<item>([\s\S]*?)<\/item>/g)];
-    const finalItems = finalItemsMatches.map(match => match[0]);
+    // ===== POST-PROCESSING VERIFICATION =====
+    console.log("\n===== PERFORMING POST-PROCESSING VERIFICATION =====");
     
-    console.log(`Final feed contains ${finalItems.length} items`);
+    // Extract items from merged feed for verification
+    const mergedItems = extractItems(mergedFeedXML);
+    console.log(`Verifying ${mergedItems.length} items in merged feed`);
     
-    // Check that all links are from newsmemory
-    const links = finalItems.map(item => extractLink(item)).filter(Boolean);
-    const nonNewsmemoryLinks = links.filter(link => !link.includes('newsmemory.com'));
+    // PHASE 1: Check for and remove any items with thearknewspaper.com links
+    const itemsWithArkLinks = mergedItems.filter(item => hasArkLink(item));
     
-    if (nonNewsmemoryLinks.length > 0) {
-      console.log(`Warning: Found ${nonNewsmemoryLinks.length} links not from newsmemory.com`);
-      console.log('Non-newsmemory links:', nonNewsmemoryLinks);
+    if (itemsWithArkLinks.length > 0) {
+      console.log(`Found ${itemsWithArkLinks.length} items with thearknewspaper.com links that need removal`);
       
-      // Remove items with non-newsmemory links
-      console.log('Removing items with non-newsmemory links...');
+      // Filter out items with ark links and rebuild the feed
+      const cleanedItems = mergedItems.filter(item => !hasArkLink(item));
       
-      // Re-extract all items
-      const cleanItemsMatches = [...mergedFeedXML.matchAll(/<item>([\s\S]*?)<\/item>/g)];
-      const allItems = cleanItemsMatches.map(match => match[0]);
-      
-      // Filter to keep only items with newsmemory links
+      // Rebuild the feed
       let cleanedFeedXML = headerXML;
-      let keepCount = 0;
+      for (const item of cleanedItems) {
+        cleanedFeedXML += item;
+      }
+      cleanedFeedXML += footerXML;
       
-      for (const item of allItems) {
-        const link = extractLink(item);
-        if (link && link.includes('newsmemory.com')) {
-          cleanedFeedXML += item;
-          keepCount++;
+      mergedFeedXML = cleanedFeedXML;
+      console.log(`Removed ${itemsWithArkLinks.length} items with thearknewspaper.com links`);
+    } else {
+      console.log("No items with thearknewspaper.com links found: PASSED");
+    }
+    
+    // PHASE 2: Check for duplicate titles
+    const titlesToItems = {};
+    const duplicateTitles = new Set();
+    const cleanedItems = extractItems(mergedFeedXML);
+    
+    // First find any duplicate titles
+    for (const item of cleanedItems) {
+      const title = extractTitle(item);
+      if (!title) continue;
+      
+      const cleanedTitle = cleanTitle(title);
+      
+      if (titlesToItems[cleanedTitle]) {
+        duplicateTitles.add(cleanedTitle);
+      } else {
+        titlesToItems[cleanedTitle] = [];
+      }
+      
+      titlesToItems[cleanedTitle].push(item);
+    }
+    
+    if (duplicateTitles.size > 0) {
+      console.log(`Found ${duplicateTitles.size} sets of duplicate titles - resolving...`);
+      
+      // Resolve duplicates - for each duplicate title:
+      // 1. Keep only the version with newsmemory.com link
+      // 2. If multiple have newsmemory links or none do, keep the first one
+      const finalCleanedItems = [];
+      
+      for (const [title, items] of Object.entries(titlesToItems)) {
+        if (items.length === 1) {
+          // No duplicates for this title
+          finalCleanedItems.push(items[0]);
+        } else {
+          // We have duplicates to resolve
+          console.log(`Resolving duplicates for title: "${extractTitle(items[0])}"`);
+          
+          // First try to find items with newsmemory links
+          const itemsWithNewsmemoryLinks = items.filter(item => hasNewsmemoryLink(item));
+          
+          if (itemsWithNewsmemoryLinks.length > 0) {
+            // Keep only the first item with a newsmemory link
+            finalCleanedItems.push(itemsWithNewsmemoryLinks[0]);
+            console.log(`  Kept 1 item with newsmemory link out of ${items.length} duplicates`);
+          } else {
+            // No items have newsmemory links (shouldn't happen), keep the first one
+            finalCleanedItems.push(items[0]);
+            console.log(`  Warning: No items had newsmemory links, kept first item`);
+          }
         }
       }
       
-      cleanedFeedXML += footerXML;
-      mergedFeedXML = cleanedFeedXML;
+      // Rebuild the feed again
+      let finalFeedXML = headerXML;
+      for (const item of finalCleanedItems) {
+        finalFeedXML += item;
+      }
+      finalFeedXML += footerXML;
       
-      console.log(`Kept ${keepCount} items with newsmemory links`);
+      mergedFeedXML = finalFeedXML;
+      console.log(`Resolved all duplicate titles, now have ${finalCleanedItems.length} items`);
     } else {
-      console.log('All links are from newsmemory.com: PASSED');
+      console.log("No duplicate titles found: PASSED");
     }
+    
+    // FINAL VERIFICATION
+    const finalItems = extractItems(mergedFeedXML);
+    
+    // Check that all links are from newsmemory
+    const nonNewsmemoryLinks = finalItems.filter(item => !hasNewsmemoryLink(item));
+    
+    if (nonNewsmemoryLinks.length > 0) {
+      console.log(`CRITICAL ERROR: Found ${nonNewsmemoryLinks.length} items without newsmemory links!`);
+      
+      // Remove them in a last-ditch effort
+      const actuallyFinalItems = finalItems.filter(item => hasNewsmemoryLink(item));
+      
+      // Rebuild one last time
+      let actuallyFinalFeedXML = headerXML;
+      for (const item of actuallyFinalItems) {
+        actuallyFinalFeedXML += item;
+      }
+      actuallyFinalFeedXML += footerXML;
+      
+      mergedFeedXML = actuallyFinalFeedXML;
+      console.log(`Emergency correction: Removed ${nonNewsmemoryLinks.length} non-newsmemory items`);
+    }
+    
+    // CHECK FOR THEARKNEWSPAPER.COM ONE LAST TIME
+    const arkLinksCheck = finalItems.some(item => {
+      const link = extractLink(item);
+      return link && link.includes('thearknewspaper.com');
+    });
+    
+    if (arkLinksCheck) {
+      console.log("CRITICAL ERROR: Still found thearknewspaper.com links in final output!");
+    } else {
+      console.log("Final check for thearknewspaper.com links: PASSED");
+    }
+    
+    console.log(`\nFinal feed contains ${finalItems.length} valid items`);
     
     // Save the output to a file
     fs.writeFileSync('merged_rss_feed.xml', mergedFeedXML);
@@ -228,7 +366,7 @@ async function mergeFeeds() {
 }
 
 // Run the script
-console.log('Starting RSS feed merger...');
+console.log('Starting Enhanced RSS feed merger with verification...');
 mergeFeeds().then(() => {
   console.log('Script completed successfully!');
 }).catch(err => {
