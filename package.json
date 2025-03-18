@@ -1,10 +1,29 @@
 {
   "name": "rss-feed-merger",
   "version": "1.0.0",
-  "description": "Merges RSS feeds",
+  "description": "Merges RSS feeds replacing primary feed links with secondary feed links",
   "main": "final-rss-merger.js",
-  "dependencies": {},
   "scripts": {
-    "update": "node final-rss-merger.js"
-  }
+    "start": "node final-rss-merger.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "rss",
+    "feed",
+    "merger",
+    "xml"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "xmldom": "^0.6.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/arkeditor/rss-feed-merger.git"
+  },
+  "bugs": {
+    "url": "https://github.com/arkeditor/rss-feed-merger/issues"
+  },
+  "homepage": "https://github.com/arkeditor/rss-feed-merger#readme"
 }
