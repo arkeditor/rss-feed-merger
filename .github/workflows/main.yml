@@ -12,10 +12,15 @@ on:
 jobs:
   merge-feeds:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write  # This gives permission to push to the repository
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v3
+        with:
+          # This ensures we get the full Git history, needed for proper commits
+          fetch-depth: 0
 
       - name: Setup Node.js
         uses: actions/setup-node@v3
@@ -28,12 +33,12 @@ jobs:
       - name: Run RSS merger script
         run: node final-rss-merger.js
 
-      - name: Configure Git
-        run: |
-          git config user.name "GitHub Actions Bot"
-          git config user.email "<>"
-
       - name: Commit and push if changed
         run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add merged_rss_feed.xml
           git diff --quiet && git diff --staged --quiet || (git commit -m "Update merged RSS feed" && git push)
+        env:
+          # This adds the GitHub token to the environment for authentication
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
