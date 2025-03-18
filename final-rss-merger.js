@@ -37,13 +37,30 @@ function fetchURL(url) {
   });
 }
 
-// Clean text for comparison
+// Clean text for comparison - more flexible matching
 function cleanText(text) {
   if (!text) return '';
-  return text.trim()
+  
+  // First normalize the text
+  let cleaned = text.trim()
+    .replace(/\s+/g, ' ')        // Normalize whitespace
+    .replace(/[^\w\s]/g, '')     // Remove punctuation
+    .toLowerCase();              // Convert to lowercase
+  
+  // Remove common prefixes/suffixes and filler words
+  cleaned = cleaned
+    .replace(/^(the|a|an) /, '')                // Remove leading articles
+    .replace(/ (to|in|at|on|by|with|for) /g, ' ') // Remove common prepositions
+    .replace(/sf|san francisco/g, '')           // Normalize location references
+    
+    // Remove words that might appear in one title but not the other
+    .replace(/awardwinning|award winning/g, '')
+    
+    // Normalize whitespace again after all the replacements
     .replace(/\s+/g, ' ')
-    .replace(/[^\w\s]/g, '')
-    .toLowerCase();
+    .trim();
+  
+  return cleaned;
 }
 
 // Main function
@@ -89,6 +106,7 @@ async function mergeFeeds() {
     
     // Build a map of titles to secondary feed links
     const newsmemoryLinksByTitle = {};
+    const secondaryTitleDetails = [];
     
     for (let i = 0; i < secondaryItems.length; i++) {
       const item = secondaryItems[i];
@@ -106,6 +124,13 @@ async function mergeFeeds() {
         title = cdataMatch ? cdataMatch[1].trim() : title.trim();
       }
       
+      // Get creator if available for additional matching
+      let creator = null;
+      const creatorElements = item.getElementsByTagName('dc:creator');
+      if (creatorElements.length > 0) {
+        creator = creatorElements[0].textContent.trim();
+      }
+      
       const cleanedTitle = cleanText(title);
       
       // Get link
@@ -118,8 +143,19 @@ async function mergeFeeds() {
       // Only keep newsmemory links
       if (link.includes('newsmemory.com')) {
         newsmemoryLinksByTitle[cleanedTitle] = link;
+        
+        // Store additional details for better matching
+        secondaryTitleDetails.push({
+          originalTitle: title,
+          cleanedTitle: cleanedTitle,
+          creator: creator,
+          link: link
+        });
       }
     }
+    
+    // Sort secondary titles by length (descending) to prioritize longer, more specific titles in matching
+    secondaryTitleDetails.sort((a, b) => b.cleanedTitle.length - a.cleanedTitle.length);
     
     console.log(`Found ${Object.keys(newsmemoryLinksByTitle).length} titles with newsmemory links`);
     
@@ -136,6 +172,9 @@ async function mergeFeeds() {
     // Process primary items
     const processedTitles = new Set();
     let matchCount = 0;
+    
+    // Advanced title matching: store all secondary titles for fuzzy matching
+    const allSecondaryTitles = Object.keys(newsmemoryLinksByTitle);
     
     for (let i = 0; i < primaryItems.length; i++) {
       const item = primaryItems[i];
@@ -161,8 +200,53 @@ async function mergeFeeds() {
         continue;
       }
       
-      // Check if we have a matching newsmemory link
-      const newsmemoryLink = newsmemoryLinksByTitle[cleanedTitle];
+      // Get creator/author if available (for additional matching criteria)
+      let creator = null;
+      const creatorElements = item.getElementsByTagName('dc:creator');
+      if (creatorElements.length > 0) {
+        creator = creatorElements[0].textContent.trim().toLowerCase();
+      }
+      
+      // Find best match in secondary feed using more flexible matching
+      let bestMatchTitle = null;
+      let bestMatchScore = 0;
+      
+      for (const secondaryTitle of allSecondaryTitles) {
+        // Calculate match score (simple similarity check)
+        const secondaryClean = secondaryTitle;
+        
+        // Check if one title contains most of the words from the other
+        const words1 = cleanedTitle.split(' ');
+        const words2 = secondaryClean.split(' ');
+        
+        // Count matching words
+        let matchingWords = 0;
+        for (const word of words1) {
+          if (word.length > 3 && words2.includes(word)) { // Only count substantial words
+            matchingWords++;
+          }
+        }
+        
+        const score = matchingWords / Math.max(words1.length, words2.length);
+        
+        // Consider it a match if:
+        // 1. At least 60% of significant words match, OR
+        // 2. We have a creator name that matches and at least 40% of words match
+        if ((score > 0.6) || (creator && secondaryTitle.includes(creator) && score > 0.4)) {
+          if (score > bestMatchScore) {
+            bestMatchScore = score;
+            bestMatchTitle = secondaryTitle;
+          }
+        }
+      }
+      
+      // Use direct match if available, otherwise use best fuzzy match
+      let newsmemoryLink = newsmemoryLinksByTitle[cleanedTitle];
+      
+      if (!newsmemoryLink && bestMatchTitle) {
+        newsmemoryLink = newsmemoryLinksByTitle[bestMatchTitle];
+        console.log(`Fuzzy matched: "${title}" with secondary title (${bestMatchScore.toFixed(2)} score)`);
+      }
       
       if (newsmemoryLink) {
         // Clone the item
