@@ -1,10 +1,7 @@
 /**
- * Robust RSS Feed Merger Script
+ * Aggressive RSS Feed Merger Script
  * 
- * Fixes:
- * 1. Ensures consistent link replacement from secondary feed
- * 2. Prevents duplicate entries
- * 3. Better debugging and error handling
+ * Forcefully replaces links and aggressively prevents duplicates
  */
 
 const https = require('https');
@@ -56,16 +53,11 @@ function extractTagValue(item, tagName) {
   return match ? match[1].trim() : '';
 }
 
-// Extract creator from item
+// Extract creator from item (handles namespaced tags like dc:creator)
 function extractCreator(item) {
   const creatorRegex = /<([^:]+:)?creator[^>]*>(.*?)<\/([^:]+:)?creator>/s;
   const match = item.match(creatorRegex);
   return match ? match[2].trim() : '';
-}
-
-// Create a unique identifier for an item based on title and creator
-function createItemIdentifier(title, creator) {
-  return `${title}|${creator}`.toLowerCase().replace(/[^a-z0-9]/g, '');
 }
 
 // Extract creator from secondary feed's "By [Name]" format
@@ -75,17 +67,30 @@ function extractCreatorFromByLine(description) {
   return match ? match[1].trim() : null;
 }
 
-// Check if titles are similar
+// Create a very specific unique identifier for an item
+function createItemIdentifier(title, creator) {
+  // Normalize the text to make matching more reliable
+  const normalized = (title + "|" + creator)
+    .toLowerCase()
+    .replace(/\s+/g, '') // Remove all whitespace
+    .replace(/[^a-z0-9]/g, ''); // Remove non-alphanumeric chars
+  
+  return normalized;
+}
+
+// Check if titles are similar enough to be a match
 function areTitlesSimilar(title1, title2) {
   if (!title1 || !title2) return false;
   
   const t1 = title1.toLowerCase().trim();
   const t2 = title2.toLowerCase().trim();
   
+  // Check if one title contains the other
   if (t1.includes(t2) || t2.includes(t1)) {
     return true;
   }
   
+  // Split into words and check for significant word overlap
   const words1 = t1.split(/\s+/).filter(w => w.length > 2);
   const words2 = t2.split(/\s+/).filter(w => w.length > 2);
   
@@ -102,22 +107,21 @@ function areTitlesSimilar(title1, title2) {
   return matchingWords / shortestLength >= 0.4;
 }
 
-// Replace link in an item more robustly
-function replaceLink(item, newLink) {
-  // First try the standard <link> tag format
-  const standardLinkRegex = /<link>(.*?)<\/link>/;
-  if (standardLinkRegex.test(item)) {
-    return item.replace(standardLinkRegex, `<link>${newLink}</link>`);
+// AGGRESSIVELY replace all link tags in an item
+function forceReplaceLinks(item, newLink) {
+  // First remove ALL link tags from the item
+  let modifiedItem = item.replace(/<link[^>]*>.*?<\/link>/g, '');
+  
+  // Then insert our new link tag after the title tag
+  const titleTagRegex = /(<title[^>]*>.*?<\/title>)/;
+  if (titleTagRegex.test(modifiedItem)) {
+    modifiedItem = modifiedItem.replace(titleTagRegex, `$1\n    <link>${newLink}</link>`);
+  } else {
+    // If no title tag, add link at the beginning of the item
+    modifiedItem = modifiedItem.replace(/<item>/, `<item>\n    <link>${newLink}</link>`);
   }
   
-  // Try alternate formats with attributes
-  const linkWithAttrsRegex = /<link[^>]*>(.*?)<\/link>/;
-  if (linkWithAttrsRegex.test(item)) {
-    return item.replace(linkWithAttrsRegex, `<link>${newLink}</link>`);
-  }
-  
-  // If no link tag found, add one before the end of the item
-  return item.replace(/<\/item>/, `<link>${newLink}</link>\n</item>`);
+  return modifiedItem;
 }
 
 // Main function
@@ -128,7 +132,7 @@ async function processFeedsAndCreateNew() {
     console.log('Fetching secondary feed...');
     const secondaryFeedXML = await fetchURL(SECONDARY_FEED_URL);
     
-    // Extract the XML declaration, RSS tag, and channel opening content
+    // Extract header (everything before the first item)
     const headerMatch = primaryFeedXML.match(/([\s\S]*?)<item>/);
     let header = headerMatch ? headerMatch[1] : '<?xml version="1.0" encoding="UTF-8"?>\n<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">\n<channel>\n';
     
@@ -138,7 +142,7 @@ async function processFeedsAndCreateNew() {
       `<atom:link href="https://arkeditor.github.io/rss-feed-merger/merged_rss_feed.xml" rel="self" type="application/rss+xml"/>`
     );
     
-    // Get the closing tags
+    // Extract footer (everything after the last item)
     const footerMatch = primaryFeedXML.match(/<\/item>([\s\S]*?)$/);
     const footer = footerMatch ? footerMatch[1] : '</channel>\n</rss>';
     
@@ -149,105 +153,132 @@ async function processFeedsAndCreateNew() {
     console.log(`Primary feed has ${primaryItems.length} items`);
     console.log(`Secondary feed has ${secondaryItems.length} items`);
     
+    // Build arrays of identifiable items from both feeds
+    const primaryItemsData = primaryItems.map((item, index) => {
+      const title = extractTagValue(item, 'title');
+      const creator = extractCreator(item);
+      return {
+        index,
+        item,
+        title,
+        creator,
+        id: createItemIdentifier(title, creator)
+      };
+    });
+    
+    const secondaryItemsData = secondaryItems.map((item, index) => {
+      const title = extractTagValue(item, 'title');
+      const desc = extractTagValue(item, 'description');
+      const creator = extractCreatorFromByLine(desc);
+      const link = extractTagValue(item, 'link');
+      return {
+        index,
+        item,
+        title,
+        creator,
+        link,
+        id: createItemIdentifier(title, creator || '')
+      };
+    });
+    
     // Start building the new feed
     let newFeedXML = header;
     let matchedCount = 0;
     
     // Track processed items to avoid duplicates
-    const processedItemIds = new Set();
+    const processedIds = new Set();
     
-    console.log('\nMatching items...');
+    console.log('\nProcessing and matching items...');
     
-    // Process each item from primary feed
-    for (let i = 0; i < primaryItems.length; i++) {
-      let primaryItem = primaryItems[i];
-      
-      const primaryTitle = extractTagValue(primaryItem, 'title');
-      const primaryCreator = extractCreator(primaryItem);
-      
-      // Create a unique identifier for this item
-      const itemId = createItemIdentifier(primaryTitle, primaryCreator);
-      
-      // Skip if we've already processed this item (prevents duplicates)
-      if (processedItemIds.has(itemId)) {
-        console.log(`\nSkipping duplicate item: "${primaryTitle}"`);
+    // Go through primary items and find matches
+    for (const primaryData of primaryItemsData) {
+      // Skip if already processed
+      if (processedIds.has(primaryData.id)) {
+        console.log(`\nSkipping duplicate primary item: "${primaryData.title}" (ID: ${primaryData.id})`);
         continue;
       }
       
-      console.log(`\nProcessing item (${i+1}/${primaryItems.length}):`);
-      console.log(`  - Title: "${primaryTitle}"`);
-      console.log(`  - Creator: "${primaryCreator}"`);
-      console.log(`  - Item ID: ${itemId}`);
+      console.log(`\nProcessing item #${primaryData.index + 1}: "${primaryData.title}"`);
+      console.log(`  - Creator: "${primaryData.creator || 'unknown'}"`);
+      console.log(`  - ID: ${primaryData.id}`);
       
-      let matchFound = false;
-      let matchedSecondaryLink = '';
+      // Find matching secondary item
+      let bestMatch = null;
+      let bestMatchScore = 0;
       
-      // Find matching item in secondary feed
-      for (let j = 0; j < secondaryItems.length; j++) {
-        const secondaryItem = secondaryItems[j];
-        const secondaryTitle = extractTagValue(secondaryItem, 'title');
-        const secondaryDescription = extractTagValue(secondaryItem, 'description');
-        const secondaryLink = extractTagValue(secondaryItem, 'link');
-        const secondaryCreator = extractCreatorFromByLine(secondaryDescription);
-        
-        const titleMatch = areTitlesSimilar(primaryTitle, secondaryTitle);
+      for (const secondaryData of secondaryItemsData) {
+        const titleMatch = areTitlesSimilar(primaryData.title, secondaryData.title);
         
         if (titleMatch) {
-          console.log(`  - Title match with: "${secondaryTitle}"`);
-          console.log(`  - Secondary creator: "${secondaryCreator || 'unknown'}"`);
-        }
-        
-        // Check creator match
-        let creatorMatch = false;
-        if (primaryCreator && secondaryCreator) {
-          const primaryParts = primaryCreator.toLowerCase().split(/\s+/);
-          const secondaryParts = secondaryCreator.toLowerCase().split(/\s+|\,\s*/);
+          console.log(`  - Title match with secondary #${secondaryData.index + 1}: "${secondaryData.title}"`);
           
-          creatorMatch = primaryParts.some(part => 
-            secondaryParts.some(secPart => 
-              part.length > 2 && secPart.length > 2 && 
-              (part.includes(secPart) || secPart.includes(part))
-            )
-          );
+          // Check creator match
+          let creatorMatch = false;
+          let creatorScore = 0;
           
-          if (titleMatch) {
-            console.log(`  - Creator match: ${creatorMatch}`);
+          if (primaryData.creator && secondaryData.creator) {
+            const primaryParts = primaryData.creator.toLowerCase().split(/\s+/);
+            const secondaryParts = secondaryData.creator.toLowerCase().split(/\s+|\,\s*/);
+            
+            // Count how many parts match
+            let matchedParts = 0;
+            for (const part of primaryParts) {
+              if (part.length <= 2) continue; // Skip very short parts
+              if (secondaryParts.some(secPart => 
+                secPart.length > 2 && (part.includes(secPart) || secPart.includes(part))
+              )) {
+                matchedParts++;
+              }
+            }
+            
+            if (matchedParts > 0) {
+              creatorMatch = true;
+              creatorScore = matchedParts / primaryParts.length;
+            }
+            
+            console.log(`    - Secondary creator: "${secondaryData.creator}"`);
+            console.log(`    - Creator match: ${creatorMatch} (score: ${creatorScore.toFixed(2)})`);
+          } else {
+            // If we don't have creator info, rely on title similarity
+            creatorMatch = titleMatch;
+            creatorScore = 0.5; // Default score
           }
-        } else {
-          // If we don't have creator info, rely on a strong title match
-          creatorMatch = titleMatch && (primaryTitle.length > 15 || secondaryTitle.length > 15);
-        }
-        
-        if (titleMatch && (creatorMatch || !secondaryCreator || !primaryCreator)) {
-          matchFound = true;
-          matchedSecondaryLink = secondaryLink;
-          console.log(`  ✓ Match found! Using link: ${matchedSecondaryLink}`);
-          break;
+          
+          // Calculate overall match score (title match is more important)
+          const overallScore = titleMatch ? (0.7 + (creatorMatch ? 0.3 * creatorScore : 0)) : 0;
+          
+          if (overallScore > bestMatchScore) {
+            bestMatchScore = overallScore;
+            bestMatch = secondaryData;
+          }
         }
       }
       
-      if (matchFound && matchedSecondaryLink) {
+      // If we found a good match
+      if (bestMatch && bestMatch.link) {
         // Mark this item as processed
-        processedItemIds.add(itemId);
+        processedIds.add(primaryData.id);
         
-        // Get the current link (for debugging)
-        const currentLink = extractTagValue(primaryItem, 'link');
-        console.log(`  - Replacing link: "${currentLink}" -> "${matchedSecondaryLink}"`);
+        console.log(`  ✓ Best match found: "${bestMatch.title}" with link: ${bestMatch.link}`);
         
-        // Replace the link tag
-        const modifiedItem = replaceLink(primaryItem, matchedSecondaryLink);
+        // Aggressively replace links
+        const modifiedItem = forceReplaceLinks(primaryData.item, bestMatch.link);
         
-        // Verify the replacement worked
-        const newLink = extractTagValue(modifiedItem, 'link');
-        if (newLink !== matchedSecondaryLink) {
-          console.log(`  ! WARNING: Link replacement failed. Expected: "${matchedSecondaryLink}", Got: "${newLink}"`);
+        // Verify link replacement worked
+        const newLinkCheck = modifiedItem.match(/<link>(.*?)<\/link>/);
+        const newLink = newLinkCheck ? newLinkCheck[1].trim() : '';
+        
+        if (newLink !== bestMatch.link) {
+          console.log(`  ! ERROR: Link replacement failed! Expected: "${bestMatch.link}", Got: "${newLink}"`);
+        } else {
+          console.log(`  - Link replacement successful`);
         }
         
         // Add the modified item to the new feed
         newFeedXML += modifiedItem;
         matchedCount++;
       } else {
-        console.log(`  ✗ No match found - excluding from output`);
+        console.log(`  ✗ No good match found - excluding from output`);
       }
     }
     
@@ -255,13 +286,48 @@ async function processFeedsAndCreateNew() {
     newFeedXML += footer;
     
     console.log(`\nMatching complete: ${matchedCount} of ${primaryItems.length} unique items matched`);
-    console.log(`Processed ${processedItemIds.size} unique items`);
+    console.log(`Processed ${processedIds.size} unique items`);
     
-    // Verify we don't have duplicate link tags in items
-    const duplicateLinkCheck = /<item>[\s\S]*?<link>.*?<\/link>[\s\S]*?<link>.*?<\/link>[\s\S]*?<\/item>/g;
-    const duplicateLinks = newFeedXML.match(duplicateLinkCheck);
-    if (duplicateLinks && duplicateLinks.length > 0) {
-      console.log(`\n! WARNING: Found ${duplicateLinks.length} items with duplicate link tags`);
+    // Final validation to ensure no duplicate items or link issues
+    console.log('\nValidating final output...');
+    
+    // Check for items with multiple link tags
+    const multiLinkRegex = /<item>[\s\S]*?<link>.*?<\/link>[\s\S]*?<link>.*?<\/link>[\s\S]*?<\/item>/g;
+    const multiLinkMatches = newFeedXML.match(multiLinkRegex) || [];
+    
+    if (multiLinkMatches.length > 0) {
+      console.log(`! WARNING: Found ${multiLinkMatches.length} items with multiple link tags`);
+    } else {
+      console.log('- No items with multiple link tags found: PASSED');
+    }
+    
+    // Check for missing link tags
+    const itemsInOutput = extractItems(newFeedXML);
+    const itemsWithoutLinks = itemsInOutput.filter(item => !/<link>.*?<\/link>/.test(item));
+    
+    if (itemsWithoutLinks.length > 0) {
+      console.log(`! WARNING: Found ${itemsWithoutLinks.length} items without link tags`);
+    } else {
+      console.log('- All items have link tags: PASSED');
+    }
+    
+    // Check for potential duplicates based on title
+    const titlesInOutput = itemsInOutput.map(item => extractTagValue(item, 'title'));
+    const titleCounts = {};
+    
+    for (const title of titlesInOutput) {
+      titleCounts[title] = (titleCounts[title] || 0) + 1;
+    }
+    
+    const possibleDuplicates = Object.entries(titleCounts).filter(([title, count]) => count > 1);
+    
+    if (possibleDuplicates.length > 0) {
+      console.log(`! WARNING: Found ${possibleDuplicates.length} possible duplicate titles:`);
+      for (const [title, count] of possibleDuplicates) {
+        console.log(`  - "${title}" appears ${count} times`);
+      }
+    } else {
+      console.log('- No duplicate titles found: PASSED');
     }
     
     // Save the output to a file
@@ -276,7 +342,7 @@ async function processFeedsAndCreateNew() {
 }
 
 // Run the script
-console.log('Starting robust RSS feed merger...');
+console.log('Starting aggressive RSS feed merger...');
 processFeedsAndCreateNew().then(() => {
   console.log('Script completed successfully!');
 }).catch(err => {
