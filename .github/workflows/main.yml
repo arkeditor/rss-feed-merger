@@ -1,0 +1,389 @@
+name: Update RSS Feed with Images
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'  # Run every 6 hours
+  workflow_dispatch:  # Allow manual runs too
+
+jobs:
+  update-feed:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+      
+      - name: Create enhanced RSS merger script
+        run: |
+          cat > enhanced-rss-merger.js << 'EOL'
+          /**
+           * Enhanced RSS Feed Merger Script that preserves images
+           */
+          const https = require('https');
+          const fs = require('fs');
+
+          // Define feed URLs
+          const PRIMARY_FEED_URL = 'https://www.thearknewspaper.com/blog-feed.xml';
+          const SECONDARY_FEED_URL = 'https://thearknewspaper-ca.newsmemory.com/rss.php?edition=The%20Ark&section=Main&device=std&images=none&content=abstract';
+
+          // Get the GitHub Pages URL from environment variable
+          const BASE_URL = process.env.GITHUB_PAGES_URL || 'https://arkeditor.github.io/rss-feed-merger';
+          
+          // Function to fetch content
+          function fetchURL(url) {
+            return new Promise((resolve, reject) => {
+              https.get(url, (res) => {
+                if (res.statusCode !== 200) {
+                  reject(new Error(`Request failed with status code ${res.statusCode}`));
+                  return;
+                }
+                
+                let data = '';
+                res.on('data', (chunk) => {
+                  data += chunk;
+                });
+                res.on('end', () => {
+                  resolve(data);
+                });
+              }).on('error', (err) => {
+                reject(err);
+              });
+            });
+          }
+
+          // Extract items from RSS feed
+          function extractItems(feedContent) {
+            const itemRegex = /<item>([\s\S]*?)<\/item>/g;
+            const items = [];
+            let match;
+            
+            while ((match = itemRegex.exec(feedContent)) !== null) {
+              items.push(match[0]);
+            }
+            
+            return items;
+          }
+
+          // Extract a specific tag value from an item
+          function extractTagValue(item, tagName) {
+            const regex = new RegExp(`<${tagName}[^>]*>(.*?)<\/${tagName}>`, 's');
+            const match = item.match(regex);
+            return match ? match[1].trim() : '';
+          }
+
+          // Extract XML tag with attributes
+          function extractFullTag(item, tagName) {
+            const regex = new RegExp(`<${tagName}[^>]*>.*?<\/${tagName}>`, 's');
+            const match = item.match(regex);
+            return match ? match[0] : '';
+          }
+
+          // Extract all tags that match a pattern (including those with namespaces)
+          function extractAllMatchingTags(item, pattern) {
+            const regex = new RegExp(`<(${pattern})[^>]*>.*?<\\/\\1>`, 'gs');
+            const matches = [];
+            let match;
+            
+            while ((match = regex.exec(item)) !== null) {
+              matches.push(match[0]);
+            }
+            
+            return matches;
+          }
+
+          // Extract self-closing tags matching a pattern
+          function extractSelfClosingTags(item, pattern) {
+            const regex = new RegExp(`<(${pattern})[^>]*\\/>`, 'gs');
+            const matches = [];
+            let match;
+            
+            while ((match = regex.exec(item)) !== null) {
+              matches.push(match[0]);
+            }
+            
+            return matches;
+          }
+
+          // Extract creator from item
+          function extractCreator(item) {
+            const creatorRegex = /<([^:]+:)?creator[^>]*>(.*?)<\/([^:]+:)?creator>/s;
+            const match = item.match(creatorRegex);
+            return match ? match[2].trim() : '';
+          }
+
+          // Extract creator from secondary feed
+          function extractCreatorFromByLine(description) {
+            if (!description) return null;
+            const match = description.match(/By\s+([^\.]+)/i);
+            return match ? match[1].trim() : null;
+          }
+
+          // Check if titles are similar
+          function areTitlesSimilar(title1, title2) {
+            if (!title1 || !title2) return false;
+            
+            const t1 = title1.toLowerCase().trim();
+            const t2 = title2.toLowerCase().trim();
+            
+            if (t1.includes(t2) || t2.includes(t1)) {
+              return true;
+            }
+            
+            const words1 = t1.split(/\s+/).filter(w => w.length > 2);
+            const words2 = t2.split(/\s+/).filter(w => w.length > 2);
+            
+            if (words1.length === 0 || words2.length === 0) return false;
+            
+            let matchingWords = 0;
+            for (const word1 of words1) {
+              if (words2.some(word2 => word2.includes(word1) || word1.includes(word2))) {
+                matchingWords++;
+              }
+            }
+            
+            const shortestLength = Math.min(words1.length, words2.length);
+            return matchingWords / shortestLength >= 0.4;
+          }
+
+          // Generate unique ID
+          function generateUniqueId(index) {
+            return `unique-item-${Date.now()}-${index}-${Math.random().toString(36).substring(2, 10)}`;
+          }
+
+          // Main function
+          async function processFeedsAndCreateNew() {
+            try {
+              console.log('Fetching primary feed...');
+              const primaryFeedXML = await fetchURL(PRIMARY_FEED_URL);
+              console.log('Fetching secondary feed...');
+              const secondaryFeedXML = await fetchURL(SECONDARY_FEED_URL);
+              
+              // Extract channel info and namespaces from the primary feed
+              const rssOpenTagMatch = primaryFeedXML.match(/<rss[^>]*>/);
+              const rssOpenTag = rssOpenTagMatch ? rssOpenTagMatch[0] : '<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">';
+              
+              // Extract channel tags
+              const channelTagsRegex = /<channel>([\s\S]*?)<item>/;
+              const channelTagsMatch = primaryFeedXML.match(channelTagsRegex);
+              let channelTags = '';
+              
+              if (channelTagsMatch) {
+                channelTags = channelTagsMatch[1];
+                
+                // Update the self-reference link
+                channelTags = channelTags.replace(
+                  /<atom:link[^>]*rel="self"[^>]*\/>/,
+                  `<atom:link href="${BASE_URL}/merged_rss_feed.xml" rel="self" type="application/rss+xml"/>`
+                );
+              } else {
+                // Create basic channel tags if not found
+                channelTags = `
+                  <title>The Ark Newspaper</title>
+                  <description>Merged RSS Feed</description>
+                  <link>https://www.thearknewspaper.com</link>
+                  <atom:link href="${BASE_URL}/merged_rss_feed.xml" rel="self" type="application/rss+xml"/>
+                `;
+              }
+              
+              console.log('Extracting items from feeds...');
+              const primaryItems = extractItems(primaryFeedXML);
+              const secondaryItems = extractItems(secondaryFeedXML);
+              
+              console.log(`Primary feed has ${primaryItems.length} items`);
+              console.log(`Secondary feed has ${secondaryItems.length} items`);
+              
+              // Create a new feed with original namespace declarations
+              let newFeedXML = '<?xml version="1.0" encoding="UTF-8"?>\n';
+              newFeedXML += rssOpenTag + '\n';
+              newFeedXML += '<channel>\n';
+              newFeedXML += channelTags;
+              
+              let matchedCount = 0;
+              
+              console.log('\nMatching items...');
+              
+              // Process each item
+              for (let i = 0; i < primaryItems.length; i++) {
+                const primaryItem = primaryItems[i];
+                
+                const primaryTitle = extractTagValue(primaryItem, 'title');
+                const primaryCreator = extractCreator(primaryItem);
+                
+                console.log(`\nProcessing item (${i+1}/${primaryItems.length}):`);
+                console.log(`  - Title: "${primaryTitle}"`);
+                
+                let matchFound = false;
+                let matchedSecondaryLink = '';
+                
+                // Find matching item in secondary feed
+                for (let j = 0; j < secondaryItems.length; j++) {
+                  const secondaryItem = secondaryItems[j];
+                  const secondaryTitle = extractTagValue(secondaryItem, 'title');
+                  const secondaryDescription = extractTagValue(secondaryItem, 'description');
+                  const secondaryLink = extractTagValue(secondaryItem, 'link');
+                  const secondaryCreator = extractCreatorFromByLine(secondaryDescription);
+                  
+                  const titleMatch = areTitlesSimilar(primaryTitle, secondaryTitle);
+                  
+                  if (titleMatch) {
+                    console.log(`  - Title match with: "${secondaryTitle}"`);
+                  }
+                  
+                  // Check creator match
+                  let creatorMatch = false;
+                  if (primaryCreator && secondaryCreator) {
+                    const primaryParts = primaryCreator.toLowerCase().split(/\s+/);
+                    const secondaryParts = secondaryCreator.toLowerCase().split(/\s+|\,\s*/);
+                    
+                    creatorMatch = primaryParts.some(part => 
+                      secondaryParts.some(secPart => 
+                        part.length > 2 && secPart.length > 2 && 
+                        (part.includes(secPart) || secPart.includes(part))
+                      )
+                    );
+                  } else {
+                    creatorMatch = titleMatch && (primaryTitle.length > 15 || secondaryTitle.length > 15);
+                  }
+                  
+                  if (titleMatch && (creatorMatch || !secondaryCreator || !primaryCreator)) {
+                    matchFound = true;
+                    matchedSecondaryLink = secondaryLink;
+                    console.log(`  ✓ Match found! Using link: ${secondaryLink}`);
+                    break;
+                  }
+                }
+                
+                if (matchFound && matchedSecondaryLink) {
+                  // Generate a unique ID
+                  const uniqueId = generateUniqueId(i);
+                  
+                  // Extract all tags from the primary item
+                  // This will grab all image-related tags, media tags, etc.
+                  const allTags = [];
+                  
+                  // Find all full tags 
+                  const tagRegex = /<([a-zA-Z0-9:]+)[^>]*>.*?<\/\1>/g;
+                  let tagMatch;
+                  
+                  while ((tagMatch = tagRegex.exec(primaryItem)) !== null) {
+                    const tagName = tagMatch[1];
+                    if (tagName !== 'item') {
+                      allTags.push({
+                        name: tagName,
+                        content: tagMatch[0],
+                        isLink: tagName === 'link',
+                        isGuid: tagName === 'guid'
+                      });
+                    }
+                  }
+                  
+                  // Find all self-closing tags
+                  const selfClosingRegex = /<([a-zA-Z0-9:]+)[^>]*\/>/g;
+                  while ((tagMatch = selfClosingRegex.exec(primaryItem)) !== null) {
+                    const tagName = tagMatch[1];
+                    allTags.push({
+                      name: tagName,
+                      content: tagMatch[0],
+                      isSelfClosing: true
+                    });
+                  }
+                  
+                  // Build a new item
+                  let newItem = '  <item>\n';
+                  
+                  // Add all tags except link and guid (we'll add these separately)
+                  for (const tag of allTags) {
+                    if (!tag.isLink && !tag.isGuid) {
+                      newItem += `    ${tag.content}\n`;
+                    }
+                  }
+                  
+                  // Add link from secondary feed
+                  newItem += `    <link>${matchedSecondaryLink}</link>\n`;
+                  
+                  // Add unique GUID
+                  newItem += `    <guid isPermaLink="false">${uniqueId}</guid>\n`;
+                  
+                  // Close the item
+                  newItem += '  </item>\n';
+                  
+                  // Add to feed
+                  newFeedXML += newItem;
+                  matchedCount++;
+                } else {
+                  console.log(`  ✗ No match found - excluding from output`);
+                }
+              }
+              
+              // Close the channel and rss tags
+              newFeedXML += '</channel>\n</rss>';
+              
+              console.log(`\nMatching complete: ${matchedCount} of ${primaryItems.length} items matched`);
+              
+              // Save the output to a file
+              fs.writeFileSync('merged_rss_feed.xml', newFeedXML);
+              console.log(`\nMerged feed saved to merged_rss_feed.xml`);
+              
+              return newFeedXML;
+            } catch (error) {
+              console.error('Error:', error.message);
+              throw error;
+            }
+          }
+
+          // Run the script
+          console.log('Starting enhanced RSS feed merger...');
+          processFeedsAndCreateNew().then(() => {
+            console.log('Script completed successfully!');
+          }).catch(err => {
+            console.error('Script failed with error:', err);
+            process.exit(1);
+          });
+          EOL
+          
+          echo "Enhanced script created successfully"
+      
+      - name: Get GitHub Pages URL
+        run: |
+          REPO_NAME=$(echo $GITHUB_REPOSITORY | cut -d'/' -f2)
+          USERNAME=$(echo $GITHUB_REPOSITORY | cut -d'/' -f1)
+          PAGES_URL="https://$USERNAME.github.io/$REPO_NAME"
+          echo "GITHUB_PAGES_URL=$PAGES_URL" >> $GITHUB_ENV
+          echo "GitHub Pages URL: $PAGES_URL"
+      
+      - name: Run the enhanced script
+        run: |
+          echo "Running enhanced RSS merger script..."
+          node enhanced-rss-merger.js
+      
+      - name: Configure Git
+        run: |
+          git config --global user.name 'github-actions[bot]'
+          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+      
+      - name: Commit and push changes
+        run: |
+          echo "Checking for changes..."
+          if [[ -f merged_rss_feed.xml ]]; then
+            git add merged_rss_feed.xml
+            if git diff --staged --quiet; then
+              echo "No changes to commit"
+            else
+              echo "Committing changes..."
+              git commit -m "Update RSS feed with images preserved"
+              echo "Pushing changes..."
+              git push
+            fi
+          else
+            echo "Error: merged_rss_feed.xml not found"
+            exit 1
+          fi
