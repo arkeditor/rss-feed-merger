@@ -108,8 +108,8 @@ function titlesMatch(primaryTitle, secondaryTitle, threshold = 0.5) {
 
 // Reformat newsmemory links to a cleaner format
 function reformatNewsmemoryLink(url) {
-  // Check if it's a newsmemory link with the right format
-  const regex = /newsmemory\.com\/rss\.php\?date=(\d+)&edition=([^&]+)&subsection=Main&page=\d+theark(\d+)_w-or9\.pdf\.(\d+)&id=art_(\d+)\.xml/;
+  // Updated regex to handle any pattern after "w-o"
+  const regex = /newsmemory\.com\/rss\.php\?date=(\d+)&edition=([^&]+)&subsection=Main&page=\d+theark(\d+)_w-o[^\.]+\.pdf\.(\d+)&id=art_(\d+)\.xml/;
   const match = url.match(regex);
   
   if (match) {
@@ -125,7 +125,8 @@ function reformatNewsmemoryLink(url) {
     return newUrl;
   }
   
-  // If no match, return the original URL
+  // If no match, log the URL that couldn't be reformatted
+  console.log(`WARNING: Could not reformat URL: ${url}`);
   return url;
 }
 
