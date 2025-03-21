@@ -63,6 +63,29 @@ function cleanText(text) {
   return cleaned;
 }
 
+// Reformat newsmemory links to a cleaner format
+function reformatNewsmemoryLink(url) {
+  // Check if it's a newsmemory link with the right format
+  const regex = /newsmemory\.com\/rss\.php\?date=(\d+)&edition=([^&]+)&subsection=Main&page=\d+theark(\d+)_w-or9\.pdf\.(\d+)&id=art_(\d+)\.xml/;
+  const match = url.match(regex);
+  
+  if (match) {
+    const date = match[1];  // e.g., 20250319
+    const edition = match[2]; // e.g., The+Ark
+    const page = match[3];   // e.g., 01
+    const artid = match[5];  // e.g., 0
+    
+    // Create reformatted URL
+    const newUrl = `https://thearknewspaper-ca.newsmemory.com?selDate=${date}&goTo=${page}&artid=${artid}&editionStart=${encodeURIComponent(edition.replace(/\+/g, ' '))}`;
+    
+    console.log(`Reformatted link:\n  From: ${url}\n  To:   ${newUrl}`);
+    return newUrl;
+  }
+  
+  // If no match, return the original URL
+  return url;
+}
+
 // Main function
 async function mergeFeeds() {
   try {
@@ -102,7 +125,23 @@ async function mergeFeeds() {
     const secondaryItems = secondaryDoc.getElementsByTagName('item');
     
     console.log(`Found ${primaryItems.length} items in primary feed`);
-    console.log(`Found ${secondaryItems.length} items in secondary feed`);
+    console.log(`Found ${secondaryItems.length} total items in secondary feed`);
+    
+    // Count items that pass the <full> tag filter
+    let validSecondaryItemCount = 0;
+    for (let i = 0; i < secondaryItems.length; i++) {
+      const item = secondaryItems[i];
+      const fullElements = item.getElementsByTagName('full');
+      
+      if (fullElements.length > 0) {
+        const fullContent = fullElements[0].textContent;
+        if (fullContent && fullContent.includes('<![CDATA[By')) {
+          validSecondaryItemCount++;
+        }
+      }
+    }
+    
+    console.log(`Found ${validSecondaryItemCount} items in secondary feed with valid <full> tags`);
     
     // Build a map of titles to secondary feed links
     const newsmemoryLinksByTitle = {};
@@ -110,6 +149,33 @@ async function mergeFeeds() {
     
     for (let i = 0; i < secondaryItems.length; i++) {
       const item = secondaryItems[i];
+      
+      // Check if the <full> tag starts with "<![CDATA[By"
+      const fullElements = item.getElementsByTagName('full');
+      let isValidSecondaryItem = false;
+      let extractedAuthor = null;
+      
+      if (fullElements.length > 0) {
+        const fullContent = fullElements[0].textContent;
+        if (fullContent && fullContent.includes('<![CDATA[By')) {
+          isValidSecondaryItem = true;
+          
+          // Extract author name from the <full> tag
+          const authorMatch = fullContent.match(/<!\[CDATA\[By\s+([A-Z]+\s+[A-Z]+)/i);
+          if (authorMatch && authorMatch[1]) {
+            extractedAuthor = authorMatch[1].trim();
+            // Normalize author name to match format in dc:creator
+            extractedAuthor = extractedAuthor.split(/\s+/)
+              .map(word => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
+              .join(' ');
+          }
+        }
+      }
+      
+      // Skip this item if it doesn't meet the criteria
+      if (!isValidSecondaryItem) {
+        continue;
+      }
       
       // Get title
       const titleElements = item.getElementsByTagName('title');
@@ -138,17 +204,21 @@ async function mergeFeeds() {
       if (linkElements.length === 0) continue;
       
       const linkElement = linkElements[0];
-      const link = linkElement.textContent.trim();
+      let link = linkElement.textContent.trim();
       
       // Only keep newsmemory links
       if (link.includes('newsmemory.com')) {
+        // Reformat the link to the cleaner format
+        link = reformatNewsmemoryLink(link);
+        
         newsmemoryLinksByTitle[cleanedTitle] = link;
         
         // Store additional details for better matching
         secondaryTitleDetails.push({
           originalTitle: title,
           cleanedTitle: cleanedTitle,
-          creator: creator,
+          creator: creator || extractedAuthor, // Use extracted author if no creator tag
+          extractedAuthor: extractedAuthor,    // Always store extracted author for matching
           link: link
         });
       }
@@ -157,7 +227,7 @@ async function mergeFeeds() {
     // Sort secondary titles by length (descending) to prioritize longer, more specific titles in matching
     secondaryTitleDetails.sort((a, b) => b.cleanedTitle.length - a.cleanedTitle.length);
     
-    console.log(`Found ${Object.keys(newsmemoryLinksByTitle).length} titles with newsmemory links`);
+    console.log(`Found ${Object.keys(newsmemoryLinksByTitle).length} unique titles with newsmemory links after filtering`);
     
     // Create a new result document starting with primary feed
     const resultDoc = parser.parseFromString(primaryFeedXML, 'text/xml');
@@ -210,10 +280,11 @@ async function mergeFeeds() {
       // Find best match in secondary feed using more flexible matching
       let bestMatchTitle = null;
       let bestMatchScore = 0;
+      let bestMatchItem = null;
       
-      for (const secondaryTitle of allSecondaryTitles) {
+      for (const secondaryItem of secondaryTitleDetails) {
         // Calculate match score (simple similarity check)
-        const secondaryClean = secondaryTitle;
+        const secondaryClean = secondaryItem.cleanedTitle;
         
         // Check if one title contains most of the words from the other
         const words1 = cleanedTitle.split(' ');
@@ -227,15 +298,30 @@ async function mergeFeeds() {
           }
         }
         
-        const score = matchingWords / Math.max(words1.length, words2.length);
+        let score = matchingWords / Math.max(words1.length, words2.length);
+        
+        // Boost score if authors match (primary dc:creator matches secondary extracted author)
+        if (creator && 
+            (secondaryItem.creator === creator || 
+             secondaryItem.extractedAuthor === creator || 
+             (secondaryItem.extractedAuthor && creator.includes(secondaryItem.extractedAuthor)) ||
+             (secondaryItem.extractedAuthor && secondaryItem.extractedAuthor.includes(creator)))) {
+          score += 0.3; // Significant boost for author match
+          console.log(`Author match boost: "${title}" - Primary: ${creator}, Secondary: ${secondaryItem.extractedAuthor}`);
+        }
         
         // Consider it a match if:
         // 1. At least 60% of significant words match, OR
         // 2. We have a creator name that matches and at least 40% of words match
-        if ((score > 0.6) || (creator && secondaryTitle.includes(creator) && score > 0.4)) {
+        if ((score > 0.6) || 
+            ((creator && secondaryItem.extractedAuthor && 
+              (creator.includes(secondaryItem.extractedAuthor) || 
+               secondaryItem.extractedAuthor.includes(creator))) && 
+             score > 0.4)) {
           if (score > bestMatchScore) {
             bestMatchScore = score;
-            bestMatchTitle = secondaryTitle;
+            bestMatchTitle = secondaryItem.cleanedTitle;
+            bestMatchItem = secondaryItem;
           }
         }
       }
@@ -243,9 +329,13 @@ async function mergeFeeds() {
       // Use direct match if available, otherwise use best fuzzy match
       let newsmemoryLink = newsmemoryLinksByTitle[cleanedTitle];
       
-      if (!newsmemoryLink && bestMatchTitle) {
-        newsmemoryLink = newsmemoryLinksByTitle[bestMatchTitle];
-        console.log(`Fuzzy matched: "${title}" with secondary title (${bestMatchScore.toFixed(2)} score)`);
+      if (!newsmemoryLink && bestMatchItem) {
+        newsmemoryLink = bestMatchItem.link;
+        console.log(`Fuzzy matched: "${title}" with secondary title "${bestMatchItem.originalTitle}" (${bestMatchScore.toFixed(2)} score)`);
+        
+        if (creator && bestMatchItem.extractedAuthor) {
+          console.log(`  Authors: Primary="${creator}", Secondary="${bestMatchItem.extractedAuthor}"`);
+        }
       }
       
       if (newsmemoryLink) {
@@ -258,11 +348,25 @@ async function mergeFeeds() {
         if (linkElements.length > 0) {
           // Replace existing link
           const linkElement = linkElements[0];
-          linkElement.textContent = newsmemoryLink;
+          
+          // Make sure it's a reformatted link
+          let linkToUse = newsmemoryLink;
+          if (linkToUse.includes('newsmemory.com/rss.php')) {
+            linkToUse = reformatNewsmemoryLink(linkToUse);
+          }
+          
+          linkElement.textContent = linkToUse;
         } else {
           // Add new link element after title
           const link = resultDoc.createElement('link');
-          link.textContent = newsmemoryLink;
+          
+          // Make sure it's a reformatted link
+          let linkToUse = newsmemoryLink;
+          if (linkToUse.includes('newsmemory.com/rss.php')) {
+            linkToUse = reformatNewsmemoryLink(linkToUse);
+          }
+          
+          link.textContent = linkToUse;
           
           // Insert after title
           newItem.insertBefore(link, titleElement.nextSibling);
