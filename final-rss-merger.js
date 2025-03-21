@@ -1,7 +1,7 @@
 /**
- * Simple and Reliable RSS Feed Merger
+ * Enhanced RSS Feed Merger
  * 
- * This script takes a direct approach with clear requirements:
+ * This script merges two RSS feeds:
  * 1. Keep ONLY items that have newsmemory.com links
  * 2. No duplicate titles allowed
  * 3. No thearknewspaper.com links allowed
@@ -61,6 +61,49 @@ function cleanText(text) {
     .trim();
   
   return cleaned;
+}
+
+// Extract title text from an item element, properly handling CDATA sections
+function extractTitleText(item) {
+  const titleElements = item.getElementsByTagName('title');
+  if (titleElements.length === 0) return null;
+  
+  const titleElement = titleElements[0];
+  let title = titleElement.textContent;
+  
+  // Handle CDATA sections
+  if (title.includes('CDATA')) {
+    const cdataMatch = title.match(/\s*<!\[CDATA\[(.*?)\]\]>\s*/);
+    return cdataMatch ? cdataMatch[1].trim() : title.trim();
+  }
+  
+  return title.trim();
+}
+
+// Advanced title matching with more flexible comparison
+function titlesMatch(primaryTitle, secondaryTitle, threshold = 0.5) {
+  // Clean both titles
+  const clean1 = cleanText(primaryTitle);
+  const clean2 = cleanText(secondaryTitle);
+  
+  // 1. Direct substring check
+  if (clean1.includes(clean2) || clean2.includes(clean1)) {
+    return true;
+  }
+  
+  // 2. Check word overlap
+  const words1 = clean1.split(/\s+/).filter(w => w.length > 3);
+  const words2 = clean2.split(/\s+/).filter(w => w.length > 3);
+  
+  let matchCount = 0;
+  for (const word of words1) {
+    if (words2.includes(word)) {
+      matchCount++;
+    }
+  }
+  
+  const overlapRatio = matchCount / Math.max(words1.length, words2.length);
+  return overlapRatio >= threshold;
 }
 
 // Reformat newsmemory links to a cleaner format
@@ -127,21 +170,44 @@ async function mergeFeeds() {
     console.log(`Found ${primaryItems.length} items in primary feed`);
     console.log(`Found ${secondaryItems.length} total items in secondary feed`);
     
-    // Count items that pass the <full> tag filter
-    let validSecondaryItemCount = 0;
+    // Count items with newsmemory links
+    let newsmemoryLinkCount = 0;
     for (let i = 0; i < secondaryItems.length; i++) {
       const item = secondaryItems[i];
-      const fullElements = item.getElementsByTagName('full');
+      const linkElements = item.getElementsByTagName('link');
       
-      if (fullElements.length > 0) {
-        const fullContent = fullElements[0].textContent;
-        if (fullContent && fullContent.includes('<![CDATA[By')) {
-          validSecondaryItemCount++;
+      if (linkElements.length > 0) {
+        const link = linkElements[0].textContent.trim();
+        if (link.includes('newsmemory.com')) {
+          newsmemoryLinkCount++;
         }
       }
     }
     
-    console.log(`Found ${validSecondaryItemCount} items in secondary feed with valid <full> tags`);
+    console.log(`Found ${newsmemoryLinkCount} items in secondary feed with newsmemory.com links`);
+    
+    // DEBUG: Log raw XML of first secondary item to check structure
+    console.log("\n=== DEBUG: SECONDARY FEED STRUCTURE ===");
+    if (secondaryItems.length > 0) {
+      const serializer = new XMLSerializer();
+      const firstItemXml = serializer.serializeToString(secondaryItems[0]);
+      console.log("First secondary item XML:");
+      console.log(firstItemXml.substring(0, 500) + "...");
+      
+      // Check for specific tags
+      console.log("\nChecking for specific tags in first item:");
+      const tagNames = ['title', 'link', 'full', 'description', 'content', 'pubDate'];
+      for (const tagName of tagNames) {
+        const elements = secondaryItems[0].getElementsByTagName(tagName);
+        console.log(`${tagName}: ${elements.length > 0 ? 'FOUND' : 'NOT FOUND'}`);
+        if (elements.length > 0) {
+          const content = elements[0].textContent;
+          console.log(`  Content: ${content.substring(0, 100)}...`);
+        }
+      }
+    } else {
+      console.log("No items found in secondary feed.");
+    }
     
     // Build a map of titles to secondary feed links
     const newsmemoryLinksByTitle = {};
@@ -151,15 +217,13 @@ async function mergeFeeds() {
       const item = secondaryItems[i];
       
       // Check if the <full> tag starts with "<![CDATA[By"
+      // Note: We're now making this check optional since <full> tags may not be present
       const fullElements = item.getElementsByTagName('full');
-      let isValidSecondaryItem = false;
       let extractedAuthor = null;
       
       if (fullElements.length > 0) {
         const fullContent = fullElements[0].textContent;
         if (fullContent && fullContent.includes('<![CDATA[By')) {
-          isValidSecondaryItem = true;
-          
           // Extract author name from the <full> tag
           const authorMatch = fullContent.match(/<!\[CDATA\[By\s+([A-Z]+\s+[A-Z]+)/i);
           if (authorMatch && authorMatch[1]) {
@@ -172,23 +236,11 @@ async function mergeFeeds() {
         }
       }
       
-      // Skip this item if it doesn't meet the criteria
-      if (!isValidSecondaryItem) {
-        continue;
-      }
+      // We're no longer skipping items without valid <full> tags
       
       // Get title
-      const titleElements = item.getElementsByTagName('title');
-      if (titleElements.length === 0) continue;
-      
-      const titleElement = titleElements[0];
-      let title = titleElement.textContent;
-      
-      // Handle CDATA
-      if (title.includes('CDATA')) {
-        const cdataMatch = title.match(/\s*<!\[CDATA\[(.*?)\]\]>\s*/);
-        title = cdataMatch ? cdataMatch[1].trim() : title.trim();
-      }
+      const title = extractTitleText(item);
+      if (!title) continue;
       
       // Get creator if available for additional matching
       let creator = null;
@@ -211,9 +263,10 @@ async function mergeFeeds() {
         // Reformat the link to the cleaner format
         link = reformatNewsmemoryLink(link);
         
+        // Store by cleaned title for exact matches
         newsmemoryLinksByTitle[cleanedTitle] = link;
         
-        // Store additional details for better matching
+        // Also store the original title and link for fuzzy matching
         secondaryTitleDetails.push({
           originalTitle: title,
           cleanedTitle: cleanedTitle,
@@ -228,6 +281,12 @@ async function mergeFeeds() {
     secondaryTitleDetails.sort((a, b) => b.cleanedTitle.length - a.cleanedTitle.length);
     
     console.log(`Found ${Object.keys(newsmemoryLinksByTitle).length} unique titles with newsmemory links after filtering`);
+    
+    // Optional: Log all secondary items for debugging
+    console.log("\n=== SECONDARY TITLES FOR REFERENCE ===");
+    for (const item of secondaryTitleDetails) {
+      console.log(`"${item.originalTitle}" ${item.extractedAuthor ? `(By ${item.extractedAuthor})` : ''}`);
+    }
     
     // Create a new result document starting with primary feed
     const resultDoc = parser.parseFromString(primaryFeedXML, 'text/xml');
@@ -250,17 +309,8 @@ async function mergeFeeds() {
       const item = primaryItems[i];
       
       // Get title
-      const titleElements = item.getElementsByTagName('title');
-      if (titleElements.length === 0) continue;
-      
-      const titleElement = titleElements[0];
-      let title = titleElement.textContent;
-      
-      // Handle CDATA
-      if (title.includes('CDATA')) {
-        const cdataMatch = title.match(/\s*<!\[CDATA\[(.*?)\]\]>\s*/);
-        title = cdataMatch ? cdataMatch[1].trim() : title.trim();
-      }
+      const title = extractTitleText(item);
+      if (!title) continue;
       
       const cleanedTitle = cleanText(title);
       
@@ -277,64 +327,50 @@ async function mergeFeeds() {
         creator = creatorElements[0].textContent.trim().toLowerCase();
       }
       
-      // Find best match in secondary feed using more flexible matching
-      let bestMatchTitle = null;
-      let bestMatchScore = 0;
-      let bestMatchItem = null;
+      // First try direct lookup
+      let newsmemoryLink = newsmemoryLinksByTitle[cleanedTitle];
       
-      for (const secondaryItem of secondaryTitleDetails) {
-        // Calculate match score (simple similarity check)
-        const secondaryClean = secondaryItem.cleanedTitle;
+      // If not found, try fuzzy matching
+      if (!newsmemoryLink) {
+        // Find best match in secondary feed using more flexible matching
+        let bestMatchScore = 0;
+        let bestMatchItem = null;
         
-        // Check if one title contains most of the words from the other
-        const words1 = cleanedTitle.split(' ');
-        const words2 = secondaryClean.split(' ');
-        
-        // Count matching words
-        let matchingWords = 0;
-        for (const word of words1) {
-          if (word.length > 3 && words2.includes(word)) { // Only count substantial words
-            matchingWords++;
+        for (const secondaryItem of secondaryTitleDetails) {
+          // First check title similarity
+          const titleMatch = titlesMatch(title, secondaryItem.originalTitle, 0.4);
+          
+          // Calculate a match score
+          let score = 0;
+          if (titleMatch) {
+            // Base score from title match
+            score = 0.6;
+            
+            // Boost score if authors match
+            if (creator && 
+                (secondaryItem.creator === creator || 
+                 secondaryItem.extractedAuthor === creator || 
+                 (secondaryItem.extractedAuthor && creator.includes(secondaryItem.extractedAuthor)) ||
+                 (secondaryItem.extractedAuthor && secondaryItem.extractedAuthor.includes(creator)))) {
+              score += 0.3; // Significant boost for author match
+              console.log(`Author match boost: "${title}" - Primary: ${creator}, Secondary: ${secondaryItem.extractedAuthor}`);
+            }
           }
-        }
-        
-        let score = matchingWords / Math.max(words1.length, words2.length);
-        
-        // Boost score if authors match (primary dc:creator matches secondary extracted author)
-        if (creator && 
-            (secondaryItem.creator === creator || 
-             secondaryItem.extractedAuthor === creator || 
-             (secondaryItem.extractedAuthor && creator.includes(secondaryItem.extractedAuthor)) ||
-             (secondaryItem.extractedAuthor && secondaryItem.extractedAuthor.includes(creator)))) {
-          score += 0.3; // Significant boost for author match
-          console.log(`Author match boost: "${title}" - Primary: ${creator}, Secondary: ${secondaryItem.extractedAuthor}`);
-        }
-        
-        // Consider it a match if:
-        // 1. At least 60% of significant words match, OR
-        // 2. We have a creator name that matches and at least 40% of words match
-        if ((score > 0.6) || 
-            ((creator && secondaryItem.extractedAuthor && 
-              (creator.includes(secondaryItem.extractedAuthor) || 
-               secondaryItem.extractedAuthor.includes(creator))) && 
-             score > 0.4)) {
+          
           if (score > bestMatchScore) {
             bestMatchScore = score;
-            bestMatchTitle = secondaryItem.cleanedTitle;
             bestMatchItem = secondaryItem;
           }
         }
-      }
-      
-      // Use direct match if available, otherwise use best fuzzy match
-      let newsmemoryLink = newsmemoryLinksByTitle[cleanedTitle];
-      
-      if (!newsmemoryLink && bestMatchItem) {
-        newsmemoryLink = bestMatchItem.link;
-        console.log(`Fuzzy matched: "${title}" with secondary title "${bestMatchItem.originalTitle}" (${bestMatchScore.toFixed(2)} score)`);
         
-        if (creator && bestMatchItem.extractedAuthor) {
-          console.log(`  Authors: Primary="${creator}", Secondary="${bestMatchItem.extractedAuthor}"`);
+        // Use best match if good enough
+        if (bestMatchItem && bestMatchScore >= 0.6) {
+          newsmemoryLink = bestMatchItem.link;
+          console.log(`Fuzzy matched: "${title}" with secondary title "${bestMatchItem.originalTitle}" (${bestMatchScore.toFixed(2)} score)`);
+          
+          if (creator && bestMatchItem.extractedAuthor) {
+            console.log(`  Authors: Primary="${creator}", Secondary="${bestMatchItem.extractedAuthor}"`);
+          }
         }
       }
       
@@ -369,7 +405,12 @@ async function mergeFeeds() {
           link.textContent = linkToUse;
           
           // Insert after title
-          newItem.insertBefore(link, titleElement.nextSibling);
+          const titleElements = newItem.getElementsByTagName('title');
+          if (titleElements.length > 0) {
+            newItem.insertBefore(link, titleElements[0].nextSibling);
+          } else {
+            newItem.appendChild(link);
+          }
         }
         
         // Add to result document
