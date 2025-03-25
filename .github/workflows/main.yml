@@ -2,9 +2,9 @@ name: RSS Feed Merger
 
 on:
   schedule:
-    # Runs at 16:00 UTC every day (9:00 AM PT during daylight saving, 8:00 AM PT during standard time)
 # For Pacific Time (UTC-8)
-- cron: '0 16,18,20,22,0,2,4,6 * * *'
+- cron: '0 16,18,20,22,0,2,4,6 * * *'  # 8am-10pm PT during standard time
+workflow_dispatch:  # Keep manual trigger
 push:
     branches: [ main ]
   # Allow manual triggering
