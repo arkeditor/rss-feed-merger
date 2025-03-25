@@ -2,12 +2,7 @@ name: RSS Feed Merger
 
 on:
   schedule:
-# For Pacific Time (UTC-8)
-- cron: '0 16,18,20,22,0,2,4,6 * * *'  # 8am-10pm PT during standard time
-workflow_dispatch:  # Keep manual trigger
-push:
-    branches: [ main ]
-  # Allow manual triggering
+    - cron: '0 8,10,12,14,16,18,20,22 * * *'
   workflow_dispatch:
 
 jobs:
