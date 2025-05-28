@@ -1,10 +1,12 @@
 /**
- * Enhanced RSS Feed Merger
+ * Enhanced RSS Feed Merger - Fixed Version
  * 
  * This script merges two RSS feeds:
  * 1. Keep ONLY items that have newsmemory.com links
  * 2. No duplicate titles allowed
  * 3. No thearknewspaper.com links allowed
+ * 4. Fix self-reference link
+ * 5. Decode HTML entities in titles
  */
 
 const https = require('https');
@@ -14,6 +16,33 @@ const { DOMParser, XMLSerializer } = require('xmldom');
 // Define feed URLs
 const PRIMARY_FEED_URL = 'https://www.thearknewspaper.com/blog-feed.xml';
 const SECONDARY_FEED_URL = 'https://thearknewspaper-ca.newsmemory.com/rss.php?edition=The%20Ark&section=Main&device=std&images=none&content=abstract';
+
+// Function to decode HTML entities
+function decodeHtmlEntities(text) {
+  if (!text) return text;
+  
+  const entityMap = {
+    '&#38;': '&',
+    '&amp;': '&',
+    '&#39;': "'",
+    '&apos;': "'",
+    '&#34;': '"',
+    '&quot;': '"',
+    '&#60;': '<',
+    '&lt;': '<',
+    '&#62;': '>',
+    '&gt;': '>',
+    '&#160;': ' ',
+    '&nbsp;': ' '
+  };
+  
+  let decoded = text;
+  for (const [entity, replacement] of Object.entries(entityMap)) {
+    decoded = decoded.replace(new RegExp(entity, 'g'), replacement);
+  }
+  
+  return decoded;
+}
 
 // Function to fetch the content of a URL
 function fetchURL(url) {
@@ -41,7 +70,10 @@ function fetchURL(url) {
 function cleanText(text) {
   if (!text) return '';
   
-  // First normalize the text
+  // First decode HTML entities
+  text = decodeHtmlEntities(text);
+  
+  // Then normalize the text
   let cleaned = text.trim()
     .replace(/\s+/g, ' ')        // Normalize whitespace
     .replace(/[^\w\s]/g, '')     // Remove punctuation
@@ -63,7 +95,7 @@ function cleanText(text) {
   return cleaned;
 }
 
-// Extract title text from an item element, properly handling CDATA sections
+// Extract title text from an item element, properly handling CDATA sections and HTML entities
 function extractTitleText(item) {
   const titleElements = item.getElementsByTagName('title');
   if (titleElements.length === 0) return null;
@@ -74,8 +106,11 @@ function extractTitleText(item) {
   // Handle CDATA sections
   if (title.includes('CDATA')) {
     const cdataMatch = title.match(/\s*<!\[CDATA\[(.*?)\]\]>\s*/);
-    return cdataMatch ? cdataMatch[1].trim() : title.trim();
+    title = cdataMatch ? cdataMatch[1].trim() : title.trim();
   }
+  
+  // Decode HTML entities
+  title = decodeHtmlEntities(title);
   
   return title.trim();
 }
@@ -130,6 +165,49 @@ function reformatNewsmemoryLink(url) {
   return url;
 }
 
+// Fix title HTML entities in place
+function fixTitleHtmlEntities(item, doc) {
+  const titleElements = item.getElementsByTagName('title');
+  if (titleElements.length === 0) return;
+  
+  const titleElement = titleElements[0];
+  let title = titleElement.textContent;
+  
+  // Handle CDATA sections
+  let isCDATA = false;
+  let rawTitle = title;
+  
+  if (title.includes('CDATA')) {
+    const cdataMatch = title.match(/\s*<!\[CDATA\[(.*?)\]\]>\s*/);
+    if (cdataMatch) {
+      rawTitle = cdataMatch[1];
+      isCDATA = true;
+    }
+  }
+  
+  // Decode HTML entities
+  const decodedTitle = decodeHtmlEntities(rawTitle);
+  
+  // Only update if there was a change
+  if (decodedTitle !== rawTitle) {
+    console.log(`Fixing title HTML entities: "${rawTitle}" -> "${decodedTitle}"`);
+    
+    // Clear existing content
+    while (titleElement.firstChild) {
+      titleElement.removeChild(titleElement.firstChild);
+    }
+    
+    // Add the fixed content
+    if (isCDATA) {
+      const cdataNode = doc.createCDATASection(decodedTitle);
+      titleElement.appendChild(cdataNode);
+    } else {
+      const textNode = doc.createTextNode(decodedTitle);
+      titleElement.appendChild(textNode);
+    }
+  }
+}
+
 // Main function
 async function mergeFeeds() {
   try {
@@ -155,11 +233,22 @@ async function mergeFeeds() {
       throw new Error('Could not find channel element in one of the feeds');
     }
     
-    // Fix self-reference link
-    const atomLinks = primaryDoc.getElementsByTagName('atom:link');
+    // Fix self-reference link - more robust approach
+    const atomLinks = primaryDoc.getElementsByTagNameNS('http://www.w3.org/2005/Atom', 'link');
     for (let i = 0; i < atomLinks.length; i++) {
       const link = atomLinks[i];
       if (link.getAttribute('rel') === 'self') {
+        console.log('Fixing self-reference link...');
+        link.setAttribute('href', 'https://arkeditor.github.io/rss-feed-merger/merged_rss_feed.xml');
+      }
+    }
+    
+    // Also check for atom:link elements without namespace
+    const atomLinksNoNS = primaryDoc.getElementsByTagName('atom:link');
+    for (let i = 0; i < atomLinksNoNS.length; i++) {
+      const link = atomLinksNoNS[i];
+      if (link.getAttribute('rel') === 'self') {
+        console.log('Fixing self-reference link (no namespace)...');
         link.setAttribute('href', 'https://arkeditor.github.io/rss-feed-merger/merged_rss_feed.xml');
       }
     }
@@ -293,6 +382,16 @@ async function mergeFeeds() {
     const resultDoc = parser.parseFromString(primaryFeedXML, 'text/xml');
     const resultChannel = resultDoc.getElementsByTagName('channel')[0];
     
+    // Fix self-reference in result document as well
+    const resultAtomLinks = resultDoc.getElementsByTagName('atom:link');
+    for (let i = 0; i < resultAtomLinks.length; i++) {
+      const link = resultAtomLinks[i];
+      if (link.getAttribute('rel') === 'self') {
+        console.log('Fixing self-reference link in result document...');
+        link.setAttribute('href', 'https://arkeditor.github.io/rss-feed-merger/merged_rss_feed.xml');
+      }
+    }
+    
     // Remove all existing items from result document
     const existingItems = resultDoc.getElementsByTagName('item');
     while (existingItems.length > 0) {
@@ -378,6 +477,9 @@ async function mergeFeeds() {
       if (newsmemoryLink) {
         // Clone the item
         const newItem = item.cloneNode(true);
+        
+        // Fix HTML entities in title
+        fixTitleHtmlEntities(newItem, resultDoc);
         
         // Replace or add link
         const linkElements = newItem.getElementsByTagName('link');
@@ -487,6 +589,20 @@ async function mergeFeeds() {
         }
         
         titleSet.add(cleanedTitle);
+      }
+    }
+    
+    // Check for HTML entities in titles
+    for (let i = 0; i < finalItems.length; i++) {
+      const item = finalItems[i];
+      const titleElements = item.getElementsByTagName('title');
+      
+      if (titleElements.length > 0) {
+        const title = titleElements[0].textContent;
+        
+        if (title.includes('&#') || title.includes('&amp;') || title.includes('&lt;') || title.includes('&gt;')) {
+          console.log(`WARNING: Title still contains HTML entities: "${title}"`);
+        }
       }
     }
     
