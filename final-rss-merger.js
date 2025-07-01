@@ -686,7 +686,8 @@ async function mergeFeeds() {
     
     // Fix self-reference links
     const atomLinks = resultDoc.getElementsByTagName('atom:link');
-    for (const link of atomLinks) {
+    const atomLinksArray = Array.from(atomLinks || []);
+    for (const link of atomLinksArray) {
       if (link.getAttribute('rel') === 'self') {
         link.setAttribute('href', 'https://arkeditor.github.io/rss-feed-merger/merged_rss_feed.xml');
         console.log('🔧 Fixed self-reference link');
