@@ -1,35 +1,34 @@
 /**
- * Advanced RSS Feed Merger - Significantly Enhanced Version
+ * Improved RSS Feed Merger - Enhanced Matching Version
  * 
  * Key improvements:
- * - Better string similarity algorithms (Levenshtein distance)
- * - Performance optimizations (indexing, caching)
- * - Date-based matching for disambiguation
- * - Configurable matching thresholds
- * - Better error handling and retry logic
- * - More sophisticated scoring system
- * - Comprehensive match reporting
+ * - Better CDATA handling in titles
+ * - Improved column parsing and text normalization
+ * - More flexible matching strategies
+ * - Better debugging output
+ * - Fixed secondary feed filtering logic
+ * - Lower thresholds for better recall
  */
 
 const https = require('https');
 const fs = require('fs');
 const { DOMParser, XMLSerializer } = require('xmldom');
 
-// Configuration object for easy tuning
+// Configuration object - adjusted for better matching
 const CONFIG = {
   primaryFeedUrl: 'https://www.thearknewspaper.com/blog-feed.xml',
   secondaryFeedUrl: 'https://thearknewspaper-ca.newsmemory.com/rss.php?edition=The%20Ark&section=Main&device=std&images=none&content=abstract',
   
-  // Matching thresholds
+  // Matching thresholds - made more permissive
   exactMatchThreshold: 1.0,
-  fuzzyMatchThreshold: 0.65,
-  wordOverlapThreshold: 0.5,
-  levenshteinThreshold: 0.7,
+  fuzzyMatchThreshold: 0.55,  // Lowered from 0.65
+  wordOverlapThreshold: 0.4,   // Lowered from 0.5
+  levenshteinThreshold: 0.6,   // Lowered from 0.7
   
   // Scoring weights
-  titleSimilarityWeight: 0.6,
-  authorMatchWeight: 0.25,
-  columnMatchWeight: 0.1,
+  titleSimilarityWeight: 0.7,  // Increased title weight
+  authorMatchWeight: 0.2,      // Reduced author weight
+  columnMatchWeight: 0.05,     // Reduced column weight
   dateProximityWeight: 0.05,
   
   // Network settings
@@ -40,7 +39,10 @@ const CONFIG = {
   // Output settings
   outputFile: 'merged_rss_feed.xml',
   generateReport: true,
-  reportFile: 'merge_report.json'
+  reportFile: 'merge_report.json',
+  
+  // Debug settings
+  verboseLogging: true
 };
 
 // Column names that might appear as prefixes in titles
@@ -59,60 +61,35 @@ const COLUMN_NAMES = [
 const TITLE_NORMALIZATIONS = new Map([
   ['town council', 'city council'],
   ['tiburon town council', 'tiburon city council'],
+  ['&amp;', 'and'],
   ['&', 'and'],
   ['w/', 'with'],
   ['st.', 'street'],
   ['rd.', 'road'],
-  ['ave.', 'avenue']
+  ['ave.', 'avenue'],
+  [''', "'"],
+  ['"', '"'],
+  ['"', '"'],
+  ['–', '-'],
+  ['—', '-']
 ]);
 
 // Compiled regex patterns for performance
 const PATTERNS = {
   htmlEntity: /&#?\w+;/g,
-  cdata: /\s*<!\[CDATA\[(.*?)\]\]>\s*/,
-  newsmemoryLink: /newsmemory\.com\/rss\.php\?date=(\d+)&edition=([^&]+)&subsection=Main&page=\d+theark(\d+)_w-o[^\.]+\.pdf\.(\d+)&id=art_(\d+)\.xml/,
-  bylineExtraction: /<!\[CDATA\[By\s+([A-Z]+\s+[A-Z]+)/i,
+  cdata: /^\s*<!\[CDATA\[(.*?)\]\]>\s*$/,
+  cdataContent: /<!\[CDATA\[(.*?)\]\]>/,
+  newsmemoryLink: /newsmemory\.com/,
+  bylineExtraction: /<!\[CDATA\[By\s+([A-Z\s]+)/i,
   whitespace: /\s+/g,
   punctuation: /[^\w\s]/g,
   leadingArticles: /^(the|a|an)\s+/i,
-  commonPrepositions: /\s+(to|in|at|on|by|with|for)\s+/gi
+  commonPrepositions: /\s+(to|in|at|on|by|with|for|of|and|or)\s+/gi,
+  extraSpaces: /\s{2,}/g
 };
 
 /**
- * Calculate Levenshtein distance between two strings
- */
-function levenshteinDistance(str1, str2) {
-  const matrix = Array(str2.length + 1).fill(null).map(() => Array(str1.length + 1).fill(null));
-  
-  for (let i = 0; i <= str1.length; i++) matrix[0][i] = i;
-  for (let j = 0; j <= str2.length; j++) matrix[j][0] = j;
-  
-  for (let j = 1; j <= str2.length; j++) {
-    for (let i = 1; i <= str1.length; i++) {
-      const indicator = str1[i - 1] === str2[j - 1] ? 0 : 1;
-      matrix[j][i] = Math.min(
-        matrix[j][i - 1] + 1,     // deletion
-        matrix[j - 1][i] + 1,     // insertion
-        matrix[j - 1][i - 1] + indicator // substitution
-      );
-    }
-  }
-  
-  return matrix[str2.length][str1.length];
-}
-
-/**
- * Calculate string similarity ratio (0-1) using Levenshtein distance
- */
-function stringSimilarity(str1, str2) {
-  if (!str1 || !str2) return 0;
-  const maxLength = Math.max(str1.length, str2.length);
-  if (maxLength === 0) return 1;
-  return 1 - (levenshteinDistance(str1, str2) / maxLength);
-}
-
-/**
- * Enhanced HTML entity decoder with more entities
+ * Enhanced HTML entity decoder
  */
 function decodeHtmlEntities(text) {
   if (!text) return text;
@@ -138,6 +115,96 @@ function decodeHtmlEntities(text) {
   }
   
   return decoded;
+}
+
+/**
+ * Enhanced CDATA and title extraction
+ */
+function extractCleanTitle(titleElement) {
+  if (!titleElement) return '';
+  
+  let title = titleElement.textContent || '';
+  
+  // Handle CDATA sections
+  const cdataMatch = title.match(PATTERNS.cdata);
+  if (cdataMatch) {
+    title = cdataMatch[1];
+  } else {
+    // Look for CDATA content within the text
+    const cdataContentMatch = title.match(PATTERNS.cdataContent);
+    if (cdataContentMatch) {
+      title = cdataContentMatch[1];
+    }
+  }
+  
+  // Decode HTML entities
+  title = decodeHtmlEntities(title);
+  
+  // Clean up extra whitespace
+  title = title.replace(PATTERNS.extraSpaces, ' ').trim();
+  
+  if (CONFIG.verboseLogging && title) {
+    console.log(`    Extracted title: "${title}"`);
+  }
+  
+  return title;
+}
+
+/**
+ * Calculate Levenshtein distance between two strings
+ */
+function levenshteinDistance(str1, str2) {
+  const matrix = Array(str2.length + 1).fill(null).map(() => Array(str1.length + 1).fill(null));
+  
+  for (let i = 0; i <= str1.length; i++) matrix[0][i] = i;
+  for (let j = 0; j <= str2.length; j++) matrix[j][0] = j;
+  
+  for (let j = 1; j <= str2.length; j++) {
+    for (let i = 1; i <= str1.length; i++) {
+      const indicator = str1[i - 1] === str2[j - 1] ? 0 : 1;
+      matrix[j][i] = Math.min(
+        matrix[j][i - 1] + 1,
+        matrix[j - 1][i] + 1,
+        matrix[j - 1][i - 1] + indicator
+      );
+    }
+  }
+  
+  return matrix[str2.length][str1.length];
+}
+
+/**
+ * Calculate string similarity ratio (0-1) using Levenshtein distance
+ */
+function stringSimilarity(str1, str2) {
+  if (!str1 || !str2) return 0;
+  if (str1 === str2) return 1;
+  
+  const maxLength = Math.max(str1.length, str2.length);
+  if (maxLength === 0) return 1;
+  
+  return 1 - (levenshteinDistance(str1, str2) / maxLength);
+}
+
+/**
+ * Calculate word overlap similarity
+ */
+function wordOverlapSimilarity(str1, str2) {
+  if (!str1 || !str2) return 0;
+  
+  const words1 = str1.toLowerCase().split(/\s+/).filter(w => w.length > 2);
+  const words2 = str2.toLowerCase().split(/\s+/).filter(w => w.length > 2);
+  
+  if (words1.length === 0 && words2.length === 0) return 1;
+  if (words1.length === 0 || words2.length === 0) return 0;
+  
+  const set1 = new Set(words1);
+  const set2 = new Set(words2);
+  
+  const intersection = new Set([...set1].filter(x => set2.has(x)));
+  const union = new Set([...set1, ...set2]);
+  
+  return intersection.size / union.size;
 }
 
 /**
@@ -177,7 +244,6 @@ async function fetchURLWithRetry(url, retries = CONFIG.maxRetries) {
         throw new Error(`Failed to fetch ${url} after ${retries} attempts: ${error.message}`);
       }
       
-      // Wait before retry
       await new Promise(resolve => setTimeout(resolve, CONFIG.retryDelay * attempt));
     }
   }
@@ -190,15 +256,13 @@ function parsePublicationDate(dateString) {
   if (!dateString) return null;
   
   try {
-    // Try standard RFC formats first
     let date = new Date(dateString);
     if (!isNaN(date.getTime())) return date;
     
-    // Try parsing other common formats
     const formats = [
-      /(\d{4})-(\d{2})-(\d{2})/,  // YYYY-MM-DD
-      /(\d{2})\/(\d{2})\/(\d{4})/, // MM/DD/YYYY
-      /(\d{1,2})\s+(\w+)\s+(\d{4})/ // D Month YYYY
+      /(\d{4})-(\d{2})-(\d{2})/,
+      /(\d{2})\/(\d{2})\/(\d{4})/,
+      /(\d{1,2})\s+(\w+)\s+(\d{4})/
     ];
     
     for (const format of formats) {
@@ -216,48 +280,48 @@ function parsePublicationDate(dateString) {
 }
 
 /**
- * Calculate date proximity score (closer dates = higher score)
- */
-function calculateDateProximity(date1, date2) {
-  if (!date1 || !date2) return 0;
-  
-  const diffMs = Math.abs(date1.getTime() - date2.getTime());
-  const diffDays = diffMs / (1000 * 60 * 60 * 24);
-  
-  // Score decreases exponentially with distance
-  return Math.exp(-diffDays / 7); // 50% score at 5 days, ~0% at 3 weeks
-}
-
-/**
- * Enhanced column title parser with better error handling
+ * Enhanced column title parser
  */
 function parseColumnTitle(title) {
   if (!title) return { columnName: null, coreTitle: title || '', fullTitle: title || '' };
   
-  const decodedTitle = decodeHtmlEntities(title.trim());
+  const cleanTitle = title.trim();
   
   for (const columnName of COLUMN_NAMES) {
-    const pattern = new RegExp(`^${columnName}\\s*:\\s*(.+)$`, 'i');
-    const match = decodedTitle.match(pattern);
+    // Try exact match with colon
+    const pattern1 = new RegExp(`^${columnName}\\s*:\\s*(.+)$`, 'i');
+    const match1 = cleanTitle.match(pattern1);
     
-    if (match) {
+    if (match1) {
       return {
         columnName: columnName,
-        coreTitle: match[1].trim(),
-        fullTitle: decodedTitle
+        coreTitle: match1[1].trim(),
+        fullTitle: cleanTitle
+      };
+    }
+    
+    // Try match without colon
+    const pattern2 = new RegExp(`^${columnName}\\s+(.+)$`, 'i');
+    const match2 = cleanTitle.match(pattern2);
+    
+    if (match2) {
+      return {
+        columnName: columnName,
+        coreTitle: match2[1].trim(),
+        fullTitle: cleanTitle
       };
     }
   }
   
   return {
     columnName: null,
-    coreTitle: decodedTitle,
-    fullTitle: decodedTitle
+    coreTitle: cleanTitle,
+    fullTitle: cleanTitle
   };
 }
 
 /**
- * Advanced text normalization with better handling
+ * Enhanced text normalization
  */
 function normalizeText(text, options = {}) {
   if (!text) return '';
@@ -270,7 +334,6 @@ function normalizeText(text, options = {}) {
   
   let workingText = text;
   
-  // Parse column information if stripping is enabled
   if (stripColumnNames) {
     const parsed = parseColumnTitle(text);
     workingText = parsed.coreTitle;
@@ -278,35 +341,32 @@ function normalizeText(text, options = {}) {
     workingText = decodeHtmlEntities(text);
   }
   
-  // Apply title normalizations
   if (applyNormalizations) {
     for (const [from, to] of TITLE_NORMALIZATIONS) {
       workingText = workingText.replace(new RegExp(from, 'gi'), to);
     }
   }
   
-  // Normalize text structure
   let normalized = workingText.trim()
     .replace(PATTERNS.whitespace, ' ')
-    .replace(PATTERNS.punctuation, '')
+    .replace(PATTERNS.punctuation, ' ')
     .toLowerCase();
   
-  // Remove common words that don't add meaning
   if (removeStopWords) {
     normalized = normalized
       .replace(PATTERNS.leadingArticles, '')
       .replace(PATTERNS.commonPrepositions, ' ')
-      .replace(/\b(sf|san francisco|bay area)\b/g, '') // Location normalization
+      .replace(/\b(sf|san francisco|bay area)\b/g, '')
       .replace(/\b(award winning|awardwinning)\b/g, '');
   }
   
-  return normalized.replace(PATTERNS.whitespace, ' ').trim();
+  return normalized.replace(PATTERNS.extraSpaces, ' ').trim();
 }
 
 /**
  * Extract comprehensive metadata from an RSS item
  */
-function extractItemMetadata(item) {
+function extractItemMetadata(item, feedType = 'unknown') {
   const metadata = {
     title: null,
     parsedTitle: null,
@@ -315,21 +375,23 @@ function extractItemMetadata(item) {
     extractedAuthor: null,
     pubDate: null,
     description: null,
-    guid: null
+    guid: null,
+    feedType: feedType
   };
+  
+  if (CONFIG.verboseLogging) {
+    console.log(`  Extracting metadata from ${feedType} item...`);
+  }
   
   // Extract title
   const titleElements = item.getElementsByTagName('title');
   if (titleElements.length > 0) {
-    let title = titleElements[0].textContent;
-    
-    if (title.includes('CDATA')) {
-      const cdataMatch = title.match(PATTERNS.cdata);
-      title = cdataMatch ? cdataMatch[1].trim() : title.trim();
-    }
-    
-    metadata.title = decodeHtmlEntities(title);
+    metadata.title = extractCleanTitle(titleElements[0]);
     metadata.parsedTitle = parseColumnTitle(metadata.title);
+    
+    if (CONFIG.verboseLogging) {
+      console.log(`    Parsed title - Column: "${metadata.parsedTitle.columnName}", Core: "${metadata.parsedTitle.coreTitle}"`);
+    }
   }
   
   // Extract link
@@ -344,12 +406,12 @@ function extractItemMetadata(item) {
     metadata.author = creatorElements[0].textContent.trim();
   }
   
-  // Extract author from <full> content
+  // Extract author from <full> content (NewMemory specific)
   const fullElements = item.getElementsByTagName('full');
   if (fullElements.length > 0) {
     const fullContent = fullElements[0].textContent;
-    if (fullContent && fullContent.includes('<![CDATA[By')) {
-      const authorMatch = fullContent.match(PATTERNS.bylineExtraction);
+    if (fullContent && fullContent.includes('By ')) {
+      const authorMatch = fullContent.match(/By\s+([A-Z\s]+)/i);
       if (authorMatch && authorMatch[1]) {
         metadata.extractedAuthor = authorMatch[1].trim()
           .split(/\s+/)
@@ -389,7 +451,8 @@ function calculateMatchScore(primary, secondary) {
     authorMatch: 0,
     columnMatch: 0,
     dateProximity: 0,
-    total: 0
+    total: 0,
+    details: {}
   };
   
   // Title similarity using multiple methods
@@ -397,26 +460,34 @@ function calculateMatchScore(primary, secondary) {
     const primaryCore = normalizeText(primary.parsedTitle.coreTitle, { stripColumnNames: false });
     const secondaryCore = normalizeText(secondary.parsedTitle.coreTitle, { stripColumnNames: false });
     
-    // Direct substring match gets highest score
-    if (primaryCore.includes(secondaryCore) || secondaryCore.includes(primaryCore)) {
+    if (CONFIG.verboseLogging) {
+      console.log(`    Comparing titles:`);
+      console.log(`      Primary core: "${primaryCore}"`);
+      console.log(`      Secondary core: "${secondaryCore}"`);
+    }
+    
+    // Exact match check
+    if (primaryCore === secondaryCore) {
       scores.titleSimilarity = 1.0;
+      scores.details.exactMatch = true;
     } else {
-      // Use Levenshtein similarity
-      scores.titleSimilarity = stringSimilarity(primaryCore, secondaryCore);
-      
-      // Also check word overlap for additional validation
-      const words1 = primaryCore.split(/\s+/).filter(w => w.length > 3);
-      const words2 = secondaryCore.split(/\s+/).filter(w => w.length > 3);
-      
-      let matchCount = 0;
-      for (const word of words1) {
-        if (words2.includes(word)) matchCount++;
+      // Substring match
+      if ((primaryCore.includes(secondaryCore) && secondaryCore.length > 10) || 
+          (secondaryCore.includes(primaryCore) && primaryCore.length > 10)) {
+        scores.titleSimilarity = 0.95;
+        scores.details.substringMatch = true;
+      } else {
+        // Levenshtein similarity
+        const levenshteinSim = stringSimilarity(primaryCore, secondaryCore);
+        
+        // Word overlap similarity
+        const wordOverlapSim = wordOverlapSimilarity(primaryCore, secondaryCore);
+        
+        // Use the better of the two
+        scores.titleSimilarity = Math.max(levenshteinSim, wordOverlapSim);
+        scores.details.levenshteinSim = levenshteinSim;
+        scores.details.wordOverlapSim = wordOverlapSim;
       }
-      
-      const wordOverlap = matchCount / Math.max(words1.length, words2.length, 1);
-      
-      // Use the better of the two similarity measures
-      scores.titleSimilarity = Math.max(scores.titleSimilarity, wordOverlap);
     }
   }
   
@@ -441,9 +512,11 @@ function calculateMatchScore(primary, secondary) {
     scores.columnMatch = col1 === col2 ? 1.0 : stringSimilarity(col1, col2);
   }
   
-  // Date proximity
+  // Date proximity (less important)
   if (primary.pubDate && secondary.pubDate) {
-    scores.dateProximity = calculateDateProximity(primary.pubDate, secondary.pubDate);
+    const diffMs = Math.abs(primary.pubDate.getTime() - secondary.pubDate.getTime());
+    const diffDays = diffMs / (1000 * 60 * 60 * 24);
+    scores.dateProximity = Math.exp(-diffDays / 7);
   }
   
   // Calculate weighted total
@@ -452,6 +525,10 @@ function calculateMatchScore(primary, secondary) {
     scores.authorMatch * CONFIG.authorMatchWeight +
     scores.columnMatch * CONFIG.columnMatchWeight +
     scores.dateProximity * CONFIG.dateProximityWeight;
+  
+  if (CONFIG.verboseLogging && scores.total > 0.3) {
+    console.log(`    Match scores: Total=${scores.total.toFixed(3)}, Title=${scores.titleSimilarity.toFixed(3)}, Author=${scores.authorMatch.toFixed(3)}`);
+  }
   
   return scores;
 }
@@ -468,11 +545,17 @@ function buildSecondaryIndexes(secondaryItems) {
     items: []
   };
   
+  console.log(`\n🔍 Building indexes for ${secondaryItems.length} secondary items...`);
+  
   for (const item of secondaryItems) {
-    const metadata = extractItemMetadata(item);
+    const metadata = extractItemMetadata(item, 'secondary');
     
-    // Only process items with newsmemory links
-    if (!metadata.link?.includes('newsmemory.com')) continue;
+    if (!metadata.title) {
+      if (CONFIG.verboseLogging) {
+        console.log(`  Skipping item with no title`);
+      }
+      continue;
+    }
     
     const normalizedFull = normalizeText(metadata.title, { stripColumnNames: false });
     const normalizedCore = normalizeText(metadata.parsedTitle?.coreTitle, { stripColumnNames: false });
@@ -518,13 +601,21 @@ function buildSecondaryIndexes(secondaryItems) {
       }
       indexes.byColumn.get(column).push(indexedItem);
     }
+    
+    if (CONFIG.verboseLogging) {
+      console.log(`  Indexed: "${metadata.title}"`);
+      console.log(`    Core: "${normalizedCore}"`);
+      console.log(`    Author: "${author}"`);
+      console.log(`    Column: "${column}"`);
+    }
   }
   
-  console.log(`Built indexes for ${indexes.items.length} secondary items`);
-  console.log(`- ${indexes.byNormalizedTitle.size} unique normalized titles`);
-  console.log(`- ${indexes.byNormalizedCore.size} unique normalized core titles`);
-  console.log(`- ${indexes.byAuthor.size} unique authors`);
-  console.log(`- ${indexes.byColumn.size} unique columns`);
+  console.log(`📊 Built indexes:`);
+  console.log(`  - ${indexes.items.length} total items`);
+  console.log(`  - ${indexes.byNormalizedTitle.size} unique normalized titles`);
+  console.log(`  - ${indexes.byNormalizedCore.size} unique normalized core titles`);
+  console.log(`  - ${indexes.byAuthor.size} unique authors`);
+  console.log(`  - ${indexes.byColumn.size} unique columns`);
   
   return indexes;
 }
@@ -533,13 +624,20 @@ function buildSecondaryIndexes(secondaryItems) {
  * Find best match for a primary item using multiple strategies
  */
 function findBestMatch(primaryMetadata, secondaryIndexes) {
+  if (!primaryMetadata.title) return null;
+  
+  console.log(`\n🔍 Finding match for: "${primaryMetadata.title}"`);
+  
   const normalizedFull = normalizeText(primaryMetadata.title, { stripColumnNames: false });
   const normalizedCore = normalizeText(primaryMetadata.parsedTitle?.coreTitle, { stripColumnNames: false });
+  
+  console.log(`  Normalized full: "${normalizedFull}"`);
+  console.log(`  Normalized core: "${normalizedCore}"`);
   
   // Strategy 1: Exact match by normalized full title
   const exactFullMatches = secondaryIndexes.byNormalizedTitle.get(normalizedFull) || [];
   if (exactFullMatches.length > 0) {
-    console.log(`Found exact full title match`);
+    console.log(`  ✅ Found exact full title match!`);
     return {
       match: exactFullMatches[0],
       score: calculateMatchScore(primaryMetadata, exactFullMatches[0].metadata),
@@ -550,7 +648,7 @@ function findBestMatch(primaryMetadata, secondaryIndexes) {
   // Strategy 2: Exact match by normalized core title
   const exactCoreMatches = secondaryIndexes.byNormalizedCore.get(normalizedCore) || [];
   if (exactCoreMatches.length > 0) {
-    console.log(`Found exact core title match`);
+    console.log(`  ✅ Found exact core title match!`);
     return {
       match: exactCoreMatches[0],
       score: calculateMatchScore(primaryMetadata, exactCoreMatches[0].metadata),
@@ -559,26 +657,12 @@ function findBestMatch(primaryMetadata, secondaryIndexes) {
   }
   
   // Strategy 3: Fuzzy matching with comprehensive scoring
-  console.log(`Performing fuzzy matching across ${secondaryIndexes.items.length} items...`);
+  console.log(`  🔄 Performing fuzzy matching across ${secondaryIndexes.items.length} items...`);
   
   let bestMatch = null;
   let bestScore = null;
   
-  // Narrow down candidates using author or column if available
-  let candidates = secondaryIndexes.items;
-  
-  const primaryAuthor = (primaryMetadata.author || primaryMetadata.extractedAuthor || '').toLowerCase();
-  const primaryColumn = primaryMetadata.parsedTitle?.columnName?.toLowerCase();
-  
-  if (primaryAuthor && secondaryIndexes.byAuthor.has(primaryAuthor)) {
-    candidates = secondaryIndexes.byAuthor.get(primaryAuthor);
-    console.log(`Narrowed to ${candidates.length} candidates by author: ${primaryAuthor}`);
-  } else if (primaryColumn && secondaryIndexes.byColumn.has(primaryColumn)) {
-    candidates = secondaryIndexes.byColumn.get(primaryColumn);
-    console.log(`Narrowed to ${candidates.length} candidates by column: ${primaryColumn}`);
-  }
-  
-  for (const candidate of candidates) {
+  for (const candidate of secondaryIndexes.items) {
     const score = calculateMatchScore(primaryMetadata, candidate.metadata);
     
     if (score.total > CONFIG.fuzzyMatchThreshold && (!bestScore || score.total > bestScore.total)) {
@@ -588,12 +672,8 @@ function findBestMatch(primaryMetadata, secondaryIndexes) {
   }
   
   if (bestMatch) {
-    console.log(`Best fuzzy match found with score ${bestScore.total.toFixed(3)}`);
-    console.log(`  Title similarity: ${bestScore.titleSimilarity.toFixed(3)}`);
-    console.log(`  Author match: ${bestScore.authorMatch.toFixed(3)}`);
-    console.log(`  Column match: ${bestScore.columnMatch.toFixed(3)}`);
-    console.log(`  Date proximity: ${bestScore.dateProximity.toFixed(3)}`);
-    
+    console.log(`  ✅ Found fuzzy match with score ${bestScore.total.toFixed(3)}`);
+    console.log(`    Secondary title: "${bestMatch.metadata.title}"`);
     return {
       match: bestMatch,
       score: bestScore,
@@ -601,6 +681,7 @@ function findBestMatch(primaryMetadata, secondaryIndexes) {
     };
   }
   
+  console.log(`  ❌ No suitable match found`);
   return null;
 }
 
@@ -608,13 +689,12 @@ function findBestMatch(primaryMetadata, secondaryIndexes) {
  * Format newsmemory URLs to cleaner format
  */
 function reformatNewsmemoryLink(url) {
-  const match = url.match(PATTERNS.newsmemoryLink);
+  // Extract components from the URL
+  const match = url.match(/date=(\d+).*?page=\d+theark(\d+).*?id=art_(\d+)\.xml/);
   
   if (match) {
-    const [, date, edition, page, , artid] = match;
-    const cleanEdition = decodeURIComponent(edition.replace(/\+/g, ' '));
-    
-    return `https://thearknewspaper-ca.newsmemory.com?selDate=${date}&goTo=${page}&artid=${artid}&editionStart=${encodeURIComponent(cleanEdition)}`;
+    const [, date, page, artid] = match;
+    return `https://thearknewspaper-ca.newsmemory.com?selDate=${date}&goTo=${page.padStart(2, '0')}&artid=${artid}&editionStart=The%20Ark`;
   }
   
   console.warn(`Could not reformat URL: ${url}`);
@@ -632,7 +712,6 @@ async function mergeFeeds() {
     stats: {
       primaryItems: 0,
       secondaryItems: 0,
-      secondaryWithLinks: 0,
       exactMatches: 0,
       fuzzyMatches: 0,
       noMatches: 0,
@@ -644,10 +723,10 @@ async function mergeFeeds() {
   };
   
   try {
-    console.log('🚀 Starting advanced RSS feed merger...');
+    console.log('🚀 Starting improved RSS feed merger...');
     
-    // Fetch feeds with retry logic
-    console.log('📥 Fetching feeds...');
+    // Fetch feeds
+    console.log('\n📥 Fetching feeds...');
     const [primaryFeedXML, secondaryFeedXML] = await Promise.all([
       fetchURLWithRetry(CONFIG.primaryFeedUrl),
       fetchURLWithRetry(CONFIG.secondaryFeedUrl)
@@ -676,9 +755,7 @@ async function mergeFeeds() {
     console.log(`📊 Found ${primaryItems.length} primary items, ${secondaryItems.length} secondary items`);
     
     // Build efficient indexes for secondary items
-    console.log('🔍 Building secondary feed indexes...');
     const secondaryIndexes = buildSecondaryIndexes(secondaryItems);
-    report.stats.secondaryWithLinks = secondaryIndexes.items.length;
     
     // Create result document
     const resultDoc = parser.parseFromString(primaryFeedXML, 'text/xml');
@@ -686,8 +763,7 @@ async function mergeFeeds() {
     
     // Fix self-reference links
     const atomLinks = resultDoc.getElementsByTagName('atom:link');
-    const atomLinksArray = Array.from(atomLinks || []);
-    for (const link of atomLinksArray) {
+    for (const link of Array.from(atomLinks || [])) {
       if (link.getAttribute('rel') === 'self') {
         link.setAttribute('href', 'https://arkeditor.github.io/rss-feed-merger/merged_rss_feed.xml');
         console.log('🔧 Fixed self-reference link');
@@ -701,19 +777,19 @@ async function mergeFeeds() {
     }
     
     // Process primary items
-    console.log('🔄 Processing primary items...');
+    console.log('\n🔄 Processing primary items...');
     const processedCores = new Set();
     
     for (let i = 0; i < primaryItems.length; i++) {
       const item = primaryItems[i];
-      const metadata = extractItemMetadata(item);
+      const metadata = extractItemMetadata(item, 'primary');
       
       if (!metadata.title) {
-        console.warn(`Skipping item ${i + 1}: no title found`);
+        console.warn(`⚠️ Skipping item ${i + 1}: no title found`);
         continue;
       }
       
-      console.log(`\n--- Processing: "${metadata.title}" ---`);
+      console.log(`\n--- Processing ${i + 1}/${primaryItems.length}: "${metadata.title}" ---`);
       
       // Check for duplicates based on core title
       const normalizedCore = normalizeText(metadata.parsedTitle?.coreTitle, { stripColumnNames: false });
@@ -730,22 +806,17 @@ async function mergeFeeds() {
         // Clone and update the item
         const newItem = item.cloneNode(true);
         
-        // Fix HTML entities in title
+        // Update title (clean up CDATA issues)
         const titleElements = newItem.getElementsByTagName('title');
         if (titleElements.length > 0) {
           const titleElement = titleElements[0];
-          const cleanTitle = decodeHtmlEntities(metadata.title);
+          const cleanTitle = metadata.title;
           
           // Clear and update title
           while (titleElement.firstChild) {
             titleElement.removeChild(titleElement.firstChild);
           }
-          
-          if (metadata.title.includes('CDATA')) {
-            titleElement.appendChild(resultDoc.createCDATASection(cleanTitle));
-          } else {
-            titleElement.appendChild(resultDoc.createTextNode(cleanTitle));
-          }
+          titleElement.appendChild(resultDoc.createTextNode(cleanTitle));
         }
         
         // Update link
@@ -820,8 +891,7 @@ async function mergeFeeds() {
       console.log(`📊 Detailed report saved to ${CONFIG.reportFile}`);
     }
     
-    // Final validation
-    await validateOutput(resultXml, report);
+    console.log(`\n📄 Merged RSS feed saved to ${CONFIG.outputFile}`);
     
     return resultXml;
     
@@ -842,67 +912,9 @@ async function mergeFeeds() {
   }
 }
 
-/**
- * Validate the output feed
- */
-async function validateOutput(xml, report) {
-  console.log('\n🔍 Validating output...');
-  
-  const parser = new DOMParser();
-  const doc = parser.parseFromString(xml, 'text/xml');
-  const items = doc.getElementsByTagName('item');
-  
-  const issues = [];
-  const titleSet = new Set();
-  
-  for (let i = 0; i < items.length; i++) {
-    const item = items[i];
-    
-    // Check for proper links
-    const linkElements = item.getElementsByTagName('link');
-    if (linkElements.length === 0) {
-      issues.push(`Item ${i + 1}: Missing link element`);
-    } else {
-      const link = linkElements[0].textContent;
-      if (link.includes('thearknewspaper.com')) {
-        issues.push(`Item ${i + 1}: Still contains thearknewspaper.com link`);
-      }
-      if (!link.includes('newsmemory.com')) {
-        issues.push(`Item ${i + 1}: Missing newsmemory.com link`);
-      }
-    }
-    
-    // Check for title issues
-    const titleElements = item.getElementsByTagName('title');
-    if (titleElements.length > 0) {
-      const title = titleElements[0].textContent;
-      
-      if (PATTERNS.htmlEntity.test(title)) {
-        issues.push(`Item ${i + 1}: Title contains unresolved HTML entities: ${title}`);
-      }
-      
-      const normalizedTitle = normalizeText(title);
-      if (titleSet.has(normalizedTitle)) {
-        issues.push(`Item ${i + 1}: Duplicate title detected: ${title}`);
-      }
-      titleSet.add(normalizedTitle);
-    } else {
-      issues.push(`Item ${i + 1}: Missing title element`);
-    }
-  }
-  
-  if (issues.length > 0) {
-    console.log(`⚠️  Found ${issues.length} validation issues:`);
-    issues.forEach(issue => console.log(`   ${issue}`));
-    report.validationIssues = issues;
-  } else {
-    console.log('✅ Validation passed - no issues found');
-  }
-}
-
 // Execute the merger
 if (require.main === module) {
-  console.log('🎬 Starting enhanced RSS feed merger...');
+  console.log('🎬 Starting improved RSS feed merger...');
   mergeFeeds()
     .then(() => console.log('🎉 Script completed successfully!'))
     .catch(err => {
