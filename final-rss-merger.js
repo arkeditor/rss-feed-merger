@@ -1,36 +1,35 @@
 /**
- * Improved RSS Feed Merger - Enhanced Matching Version v2.0
+ * Enhanced RSS Feed Merger - Fragment Detection Version v2.1
  * 
- * Key improvements:
- * - Better CDATA handling in titles
- * - Improved column parsing and text normalization
- * - More flexible matching strategies
- * - Better debugging output
- * - Fixed secondary feed filtering logic
- * - Lower thresholds for better recall
- * - Enhanced prefix handling for various title formats
- * - Improved author extraction from secondary feed
+ * Key improvements over v2.0:
+ * - Fragment detection for very short secondary titles
+ * - Enhanced partial matching for column names
+ * - Better punctuation handling in matching
+ * - Improved scoring for short title matches
+ * - More sophisticated column name detection
  */
 
 const https = require('https');
 const fs = require('fs');
 const { DOMParser, XMLSerializer } = require('xmldom');
 
-// Configuration object - adjusted for better matching
+// Configuration object - enhanced for fragment detection
 const CONFIG = {
   primaryFeedUrl: 'https://www.thearknewspaper.com/blog-feed.xml',
   secondaryFeedUrl: 'https://thearknewspaper-ca.newsmemory.com/rss.php?edition=The%20Ark&section=Main&device=std&images=none&content=abstract',
   
-  // Matching thresholds - made more permissive
+  // Matching thresholds - adjusted for better fragment detection
   exactMatchThreshold: 1.0,
-  fuzzyMatchThreshold: 0.55,  // Lowered from 0.65
-  wordOverlapThreshold: 0.4,   // Lowered from 0.5
-  levenshteinThreshold: 0.6,   // Lowered from 0.7
+  fuzzyMatchThreshold: 0.55,
+  wordOverlapThreshold: 0.4,
+  levenshteinThreshold: 0.6,
+  fragmentMatchThreshold: 0.8,    // New: for very short titles
+  columnMatchBonus: 0.3,          // New: bonus for column name matches
   
   // Scoring weights
-  titleSimilarityWeight: 0.7,  // Increased title weight
-  authorMatchWeight: 0.2,      // Reduced author weight
-  columnMatchWeight: 0.05,     // Reduced column weight
+  titleSimilarityWeight: 0.7,
+  authorMatchWeight: 0.2,
+  columnMatchWeight: 0.05,
   dateProximityWeight: 0.05,
   
   // Network settings
@@ -47,7 +46,7 @@ const CONFIG = {
   verboseLogging: true
 };
 
-// Column names that might appear as prefixes in titles
+// Enhanced column names that might appear as prefixes in titles
 const COLUMN_NAMES = [
   'New Business',
   'Sports Shout', 
@@ -57,6 +56,18 @@ const COLUMN_NAMES = [
   'Garden Plot',
   'Travel Bug',
   'Wildflower Watch'
+];
+
+// Enhanced column fragments - for detecting partial column names
+const COLUMN_FRAGMENTS = [
+  { fragment: 'Encounters', fullName: 'Everyday Encounters' },
+  { fragment: 'Encounter', fullName: 'Everyday Encounters' },
+  { fragment: 'Sports Shout', fullName: 'Sports Shout' },
+  { fragment: 'Notes from an Appraiser', fullName: 'Notes from an Appraiser' },
+  { fragment: 'Garden Plot', fullName: 'Garden Plot' },
+  { fragment: 'Travel Bug', fullName: 'Travel Bug' },
+  { fragment: 'Wildflower Watch', fullName: 'Wildflower Watch' },
+  { fragment: 'New Business', fullName: 'New Business' }
 ];
 
 // Common title variations and normalizations
@@ -87,7 +98,8 @@ const PATTERNS = {
   punctuation: /[^\w\s]/g,
   leadingArticles: /^(the|a|an)\s+/i,
   commonPrepositions: /\s+(to|in|at|on|by|with|for|of|and|or)\s+/gi,
-  extraSpaces: /\s{2,}/g
+  extraSpaces: /\s{2,}/g,
+  trailingPunctuation: /[,;:]+$/g  // New: for removing trailing punctuation
 };
 
 /**
@@ -120,7 +132,7 @@ function decodeHtmlEntities(text) {
 }
 
 /**
- * Enhanced CDATA and title extraction
+ * Enhanced CDATA and title extraction with better punctuation handling
  */
 function extractCleanTitle(titleElement) {
   if (!titleElement) return '';
@@ -142,8 +154,10 @@ function extractCleanTitle(titleElement) {
   // Decode HTML entities
   title = decodeHtmlEntities(title);
   
-  // Clean up extra whitespace
-  title = title.replace(PATTERNS.extraSpaces, ' ').trim();
+  // Clean up extra whitespace and trailing punctuation
+  title = title.replace(PATTERNS.extraSpaces, ' ')
+               .replace(PATTERNS.trailingPunctuation, '')
+               .trim();
   
   if (CONFIG.verboseLogging && title) {
     console.log('    Extracted title: "' + title + '"');
@@ -207,6 +221,77 @@ function wordOverlapSimilarity(str1, str2) {
   const union = new Set([...set1, ...set2]);
   
   return intersection.size / union.size;
+}
+
+/**
+ * Enhanced fragment detection - check if a short title is a fragment of a longer one
+ */
+function detectFragment(shortTitle, longTitle) {
+  if (!shortTitle || !longTitle) return 0;
+  
+  const shortNorm = normalizeText(shortTitle, { stripColumnNames: false });
+  const longNorm = normalizeText(longTitle, { stripColumnNames: false });
+  
+  // If short title is very short (< 15 chars), be more permissive
+  if (shortNorm.length < 15) {
+    // Check if all words in short title appear in long title
+    const shortWords = shortNorm.split(/\s+/).filter(w => w.length > 2);
+    const longWords = longNorm.split(/\s+/).filter(w => w.length > 2);
+    
+    if (shortWords.length === 0) return 0;
+    
+    const matchedWords = shortWords.filter(word => 
+      longWords.some(longWord => 
+        longWord.includes(word) || word.includes(longWord) || 
+        stringSimilarity(word, longWord) > 0.8
+      )
+    );
+    
+    return matchedWords.length / shortWords.length;
+  }
+  
+  // For longer titles, use regular substring matching
+  if (longNorm.includes(shortNorm)) return 0.9;
+  if (shortNorm.includes(longNorm)) return 0.9;
+  
+  return 0;
+}
+
+/**
+ * Enhanced column fragment detection
+ */
+function detectColumnFragment(title) {
+  if (!title) return null;
+  
+  const normalizedTitle = title.toLowerCase().replace(PATTERNS.trailingPunctuation, '').trim();
+  
+  // Check for exact fragment matches
+  for (const { fragment, fullName } of COLUMN_FRAGMENTS) {
+    if (normalizedTitle === fragment.toLowerCase()) {
+      return {
+        fragment: fragment,
+        fullName: fullName,
+        confidence: 1.0
+      };
+    }
+  }
+  
+  // Check for partial fragment matches
+  for (const { fragment, fullName } of COLUMN_FRAGMENTS) {
+    const fragLower = fragment.toLowerCase();
+    if (normalizedTitle.includes(fragLower) || fragLower.includes(normalizedTitle)) {
+      const similarity = stringSimilarity(normalizedTitle, fragLower);
+      if (similarity > 0.7) {
+        return {
+          fragment: fragment,
+          fullName: fullName,
+          confidence: similarity
+        };
+      }
+    }
+  }
+  
+  return null;
 }
 
 /**
@@ -282,7 +367,7 @@ function parsePublicationDate(dateString) {
 }
 
 /**
- * Enhanced title parser that handles various prefixes beyond just column names
+ * Enhanced title parser with better column detection
  */
 function parseColumnTitle(title) {
   if (!title) {
@@ -291,7 +376,19 @@ function parseColumnTitle(title) {
   
   const cleanTitle = title.trim();
   
-  // Simple approach - check each column name directly
+  // First check if this is a known column fragment
+  const fragmentResult = detectColumnFragment(cleanTitle);
+  if (fragmentResult && fragmentResult.confidence > 0.8) {
+    return {
+      columnName: fragmentResult.fullName,
+      coreTitle: cleanTitle, // For fragments, the whole title is the "core"
+      fullTitle: cleanTitle,
+      isFragment: true,
+      fragmentConfidence: fragmentResult.confidence
+    };
+  }
+  
+  // Check each full column name directly
   for (let i = 0; i < COLUMN_NAMES.length; i++) {
     const columnName = COLUMN_NAMES[i];
     
@@ -398,6 +495,7 @@ function normalizeText(text, options = {}) {
   let normalized = workingText.trim()
     .replace(PATTERNS.whitespace, ' ')
     .replace(PATTERNS.punctuation, ' ')
+    .replace(PATTERNS.trailingPunctuation, '')
     .toLowerCase();
   
   if (removeStopWords) {
@@ -439,6 +537,9 @@ function extractItemMetadata(item, feedType = 'unknown') {
     
     if (CONFIG.verboseLogging) {
       console.log('    Parsed title - Column: "' + metadata.parsedTitle.columnName + '", Core: "' + metadata.parsedTitle.coreTitle + '"');
+      if (metadata.parsedTitle.isFragment) {
+        console.log('    Detected as fragment with confidence: ' + metadata.parsedTitle.fragmentConfidence);
+      }
     }
   }
   
@@ -524,7 +625,7 @@ function extractItemMetadata(item, feedType = 'unknown') {
 }
 
 /**
- * Calculate comprehensive match score between two articles
+ * Enhanced match score calculation with fragment detection
  */
 function calculateMatchScore(primary, secondary) {
   const scores = {
@@ -532,6 +633,7 @@ function calculateMatchScore(primary, secondary) {
     authorMatch: 0,
     columnMatch: 0,
     dateProximity: 0,
+    fragmentBonus: 0,
     total: 0,
     details: {}
   };
@@ -540,6 +642,8 @@ function calculateMatchScore(primary, secondary) {
   if (primary.parsedTitle && secondary.parsedTitle) {
     const primaryCore = normalizeText(primary.parsedTitle.coreTitle, { stripColumnNames: false });
     const secondaryCore = normalizeText(secondary.parsedTitle.coreTitle, { stripColumnNames: false });
+    const primaryFull = normalizeText(primary.title, { stripColumnNames: false });
+    const secondaryFull = normalizeText(secondary.title, { stripColumnNames: false });
     
     if (CONFIG.verboseLogging) {
       console.log('    Comparing titles:');
@@ -547,27 +651,64 @@ function calculateMatchScore(primary, secondary) {
       console.log('      Secondary core: "' + secondaryCore + '"');
     }
     
-    // Exact match check
-    if (primaryCore === secondaryCore) {
-      scores.titleSimilarity = 1.0;
-      scores.details.exactMatch = true;
+    // Fragment detection - check if either title is a fragment of the other
+    const fragmentScore1 = detectFragment(secondaryFull, primaryFull);
+    const fragmentScore2 = detectFragment(secondaryCore, primaryCore);
+    const fragmentScore3 = detectFragment(primaryCore, secondaryFull);
+    const maxFragmentScore = Math.max(fragmentScore1, fragmentScore2, fragmentScore3);
+    
+    if (maxFragmentScore > CONFIG.fragmentMatchThreshold) {
+      scores.titleSimilarity = maxFragmentScore;
+      scores.fragmentBonus = CONFIG.columnMatchBonus;
+      scores.details.fragmentMatch = true;
+      scores.details.fragmentScore = maxFragmentScore;
+      
+      if (CONFIG.verboseLogging) {
+        console.log('      Fragment detected with score: ' + maxFragmentScore.toFixed(3));
+      }
     } else {
-      // Substring match
-      if ((primaryCore.includes(secondaryCore) && secondaryCore.length > 10) || 
-          (secondaryCore.includes(primaryCore) && primaryCore.length > 10)) {
-        scores.titleSimilarity = 0.95;
-        scores.details.substringMatch = true;
+      // Exact match check
+      if (primaryCore === secondaryCore) {
+        scores.titleSimilarity = 1.0;
+        scores.details.exactMatch = true;
       } else {
-        // Levenshtein similarity
-        const levenshteinSim = stringSimilarity(primaryCore, secondaryCore);
-        
-        // Word overlap similarity
-        const wordOverlapSim = wordOverlapSimilarity(primaryCore, secondaryCore);
-        
-        // Use the better of the two
-        scores.titleSimilarity = Math.max(levenshteinSim, wordOverlapSim);
-        scores.details.levenshteinSim = levenshteinSim;
-        scores.details.wordOverlapSim = wordOverlapSim;
+        // Substring match
+        if ((primaryCore.includes(secondaryCore) && secondaryCore.length > 10) || 
+            (secondaryCore.includes(primaryCore) && primaryCore.length > 10)) {
+          scores.titleSimilarity = 0.95;
+          scores.details.substringMatch = true;
+        } else {
+          // Levenshtein similarity
+          const levenshteinSim = stringSimilarity(primaryCore, secondaryCore);
+          
+          // Word overlap similarity
+          const wordOverlapSim = wordOverlapSimilarity(primaryCore, secondaryCore);
+          
+          // Use the better of the two
+          scores.titleSimilarity = Math.max(levenshteinSim, wordOverlapSim);
+          scores.details.levenshteinSim = levenshteinSim;
+          scores.details.wordOverlapSim = wordOverlapSim;
+        }
+      }
+    }
+    
+    // Column name matching with fragment detection
+    if (primary.parsedTitle?.columnName && secondary.parsedTitle?.columnName) {
+      const col1 = primary.parsedTitle.columnName.toLowerCase();
+      const col2 = secondary.parsedTitle.columnName.toLowerCase();
+      
+      if (col1 === col2) {
+        scores.columnMatch = 1.0;
+      } else {
+        // Check for column fragment matches
+        const fragmentResult = detectColumnFragment(secondary.title);
+        if (fragmentResult && fragmentResult.fullName.toLowerCase() === col1) {
+          scores.columnMatch = fragmentResult.confidence;
+          scores.fragmentBonus += CONFIG.columnMatchBonus;
+          scores.details.columnFragmentMatch = true;
+        } else {
+          scores.columnMatch = stringSimilarity(col1, col2);
+        }
       }
     }
   }
@@ -586,13 +727,6 @@ function calculateMatchScore(primary, secondary) {
     }
   }
   
-  // Column name matching
-  if (primary.parsedTitle?.columnName && secondary.parsedTitle?.columnName) {
-    const col1 = primary.parsedTitle.columnName.toLowerCase();
-    const col2 = secondary.parsedTitle.columnName.toLowerCase();
-    scores.columnMatch = col1 === col2 ? 1.0 : stringSimilarity(col1, col2);
-  }
-  
   // Date proximity (less important)
   if (primary.pubDate && secondary.pubDate) {
     const diffMs = Math.abs(primary.pubDate.getTime() - secondary.pubDate.getTime());
@@ -605,10 +739,14 @@ function calculateMatchScore(primary, secondary) {
     scores.titleSimilarity * CONFIG.titleSimilarityWeight +
     scores.authorMatch * CONFIG.authorMatchWeight +
     scores.columnMatch * CONFIG.columnMatchWeight +
-    scores.dateProximity * CONFIG.dateProximityWeight;
+    scores.dateProximity * CONFIG.dateProximityWeight +
+    scores.fragmentBonus;
   
   if (CONFIG.verboseLogging && scores.total > 0.3) {
     console.log('    Match scores: Total=' + scores.total.toFixed(3) + ', Title=' + scores.titleSimilarity.toFixed(3) + ', Author=' + scores.authorMatch.toFixed(3));
+    if (scores.fragmentBonus > 0) {
+      console.log('    Fragment bonus: ' + scores.fragmentBonus.toFixed(3));
+    }
   }
   
   return scores;
@@ -623,6 +761,7 @@ function buildSecondaryIndexes(secondaryItems) {
     byNormalizedCore: new Map(),
     byAuthor: new Map(),
     byColumn: new Map(),
+    byFragment: new Map(),  // New: for fragment detection
     items: []
   };
   
@@ -683,11 +822,27 @@ function buildSecondaryIndexes(secondaryItems) {
       indexes.byColumn.get(column).push(indexedItem);
     }
     
+    // New: Index by fragment detection
+    const fragmentResult = detectColumnFragment(metadata.title);
+    if (fragmentResult) {
+      const fragmentKey = fragmentResult.fullName.toLowerCase();
+      if (!indexes.byFragment.has(fragmentKey)) {
+        indexes.byFragment.set(fragmentKey, []);
+      }
+      indexes.byFragment.get(fragmentKey).push({
+        ...indexedItem,
+        fragmentConfidence: fragmentResult.confidence
+      });
+    }
+    
     if (CONFIG.verboseLogging) {
       console.log('  Indexed: "' + metadata.title + '"');
       console.log('    Core: "' + normalizedCore + '"');
       console.log('    Author: "' + author + '"');
       console.log('    Column: "' + column + '"');
+      if (fragmentResult) {
+        console.log('    Fragment: "' + fragmentResult.fullName + '" (conf: ' + fragmentResult.confidence.toFixed(2) + ')');
+      }
     }
   }
   
@@ -697,12 +852,13 @@ function buildSecondaryIndexes(secondaryItems) {
   console.log('  - ' + indexes.byNormalizedCore.size + ' unique normalized core titles');
   console.log('  - ' + indexes.byAuthor.size + ' unique authors');
   console.log('  - ' + indexes.byColumn.size + ' unique columns');
+  console.log('  - ' + indexes.byFragment.size + ' unique fragments');
   
   return indexes;
 }
 
 /**
- * Find best match for a primary item using multiple strategies
+ * Enhanced best match finder with fragment detection
  */
 function findBestMatch(primaryMetadata, secondaryIndexes) {
   if (!primaryMetadata.title) return null;
@@ -737,7 +893,24 @@ function findBestMatch(primaryMetadata, secondaryIndexes) {
     };
   }
   
-  // Strategy 3: Check if any secondary title matches our core (prefix removal)
+  // Strategy 3: Fragment detection - check if primary has a column that matches a secondary fragment
+  if (primaryMetadata.parsedTitle?.columnName) {
+    const primaryColumnKey = primaryMetadata.parsedTitle.columnName.toLowerCase();
+    const fragmentMatches = secondaryIndexes.byFragment.get(primaryColumnKey) || [];
+    
+    for (const fragmentMatch of fragmentMatches) {
+      if (fragmentMatch.fragmentConfidence > 0.8) {
+        console.log('  ✅ Found fragment match! Primary column "' + primaryMetadata.parsedTitle.columnName + '" matches secondary fragment "' + fragmentMatch.metadata.title + '"');
+        return {
+          match: fragmentMatch,
+          score: calculateMatchScore(primaryMetadata, fragmentMatch.metadata),
+          strategy: 'fragment_column'
+        };
+      }
+    }
+  }
+  
+  // Strategy 4: Check if any secondary title matches our core (prefix removal)
   for (const [secondaryNormalized, candidates] of secondaryIndexes.byNormalizedTitle) {
     if (secondaryNormalized === normalizedCore) {
       console.log('  ✅ Found prefix-removed match! Secondary "' + candidates[0].metadata.title + '" matches our core');
@@ -749,7 +922,7 @@ function findBestMatch(primaryMetadata, secondaryIndexes) {
     }
   }
   
-  // Strategy 4: Check if our full title matches any secondary core (reverse prefix removal)
+  // Strategy 5: Check if our full title matches any secondary core (reverse prefix removal)
   for (const candidate of secondaryIndexes.items) {
     if (candidate.normalizedCore === normalizedFull) {
       console.log('  ✅ Found reverse prefix match! Our full matches their core "' + candidate.metadata.title + '"');
@@ -761,8 +934,8 @@ function findBestMatch(primaryMetadata, secondaryIndexes) {
     }
   }
   
-  // Strategy 5: Fuzzy matching with comprehensive scoring
-  console.log('  🔄 Performing fuzzy matching across ' + secondaryIndexes.items.length + ' items...');
+  // Strategy 6: Enhanced fuzzy matching with fragment detection
+  console.log('  🔄 Performing enhanced fuzzy matching across ' + secondaryIndexes.items.length + ' items...');
   
   let bestMatch = null;
   let bestScore = null;
@@ -819,6 +992,7 @@ async function mergeFeeds() {
       secondaryItems: 0,
       exactMatches: 0,
       fuzzyMatches: 0,
+      fragmentMatches: 0,
       noMatches: 0,
       duplicatesSkipped: 0
     },
@@ -828,7 +1002,7 @@ async function mergeFeeds() {
   };
   
   try {
-    console.log('🚀 Starting improved RSS feed merger...');
+    console.log('🚀 Starting enhanced RSS feed merger v2.1...');
     
     // Fetch feeds
     console.log('\n📥 Fetching feeds...');
@@ -940,9 +1114,11 @@ async function mergeFeeds() {
         resultChannel.appendChild(newItem);
         processedCores.add(normalizedCore);
         
-        // Update stats and report
+        // Update stats and report based on strategy
         if (matchResult.strategy === 'exact_full' || matchResult.strategy === 'exact_core') {
           report.stats.exactMatches++;
+        } else if (matchResult.strategy === 'fragment_column') {
+          report.stats.fragmentMatches++;
         } else {
           report.stats.fuzzyMatches++;
         }
@@ -976,7 +1152,7 @@ async function mergeFeeds() {
     
     // Compile final statistics
     const endTime = Date.now();
-    const totalMatched = report.stats.exactMatches + report.stats.fuzzyMatches;
+    const totalMatched = report.stats.exactMatches + report.stats.fuzzyMatches + report.stats.fragmentMatches;
     
     report.endTime = new Date().toISOString();
     report.durationMs = endTime - startTime;
@@ -986,6 +1162,7 @@ async function mergeFeeds() {
     console.log('⏱️  Duration: ' + (report.durationMs / 1000).toFixed(2) + 's');
     console.log('📝 Final feed: ' + totalMatched + ' items');
     console.log('🎯 Exact matches: ' + report.stats.exactMatches);
+    console.log('🧩 Fragment matches: ' + report.stats.fragmentMatches);
     console.log('🔍 Fuzzy matches: ' + report.stats.fuzzyMatches);
     console.log('❌ No matches: ' + report.stats.noMatches);
     console.log('⚠️  Duplicates skipped: ' + report.stats.duplicatesSkipped);
@@ -1019,7 +1196,7 @@ async function mergeFeeds() {
 
 // Execute the merger
 if (require.main === module) {
-  console.log('🎬 Starting improved RSS feed merger...');
+  console.log('🎬 Starting enhanced RSS feed merger v2.1...');
   mergeFeeds()
     .then(() => console.log('🎉 Script completed successfully!'))
     .catch(err => {
