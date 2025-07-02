@@ -1,12 +1,11 @@
 /**
- * Enhanced RSS Feed Merger - Fragment Detection Version v2.1
+ * Enhanced RSS Feed Merger - Jump Page Filtering Version v2.1.1
  * 
- * Key improvements over v2.0:
- * - Fragment detection for very short secondary titles
- * - Enhanced partial matching for column names
- * - Better punctuation handling in matching
- * - Improved scoring for short title matches
- * - More sophisticated column name detection
+ * Key improvements over v2.1:
+ * - Jump page filtering - excludes "from page" continuations
+ * - Duplicate secondary item prevention
+ * - Enhanced continuation detection (from, continued, cont.)
+ * - Better story start vs. continuation differentiation
  */
 
 const https = require('https');
@@ -224,10 +223,25 @@ function wordOverlapSimilarity(str1, str2) {
 }
 
 /**
- * Enhanced fragment detection - check if a short title is a fragment of a longer one
+ * Enhanced fragment detection with jump page filtering
  */
 function detectFragment(shortTitle, longTitle) {
   if (!shortTitle || !longTitle) return 0;
+  
+  // Skip jump pages - look for continuation indicators
+  const shortLower = shortTitle.toLowerCase();
+  if (shortLower.includes('from page') || 
+      shortLower.includes('from pg') ||
+      shortLower.includes(', from') ||
+      shortLower.includes(' from ') ||
+      shortLower.endsWith('from') ||
+      shortLower.includes('continued') ||
+      shortLower.includes('cont.')) {
+    if (CONFIG.verboseLogging) {
+      console.log('    Skipping jump page in fragment detection: "' + shortTitle + '"');
+    }
+    return 0;
+  }
   
   const shortNorm = normalizeText(shortTitle, { stripColumnNames: false });
   const longNorm = normalizeText(longTitle, { stripColumnNames: false });
@@ -258,12 +272,24 @@ function detectFragment(shortTitle, longTitle) {
 }
 
 /**
- * Enhanced column fragment detection
+ * Enhanced column fragment detection with jump page filtering
  */
 function detectColumnFragment(title) {
   if (!title) return null;
   
   const normalizedTitle = title.toLowerCase().replace(PATTERNS.trailingPunctuation, '').trim();
+  
+  // Skip jump pages - fragments followed by "from" indicate continuation pages
+  if (normalizedTitle.includes('from page') || 
+      normalizedTitle.includes('from pg') ||
+      normalizedTitle.includes(', from') ||
+      normalizedTitle.includes(' from ') ||
+      normalizedTitle.endsWith('from')) {
+    if (CONFIG.verboseLogging) {
+      console.log('    Skipping jump page fragment: "' + title + '"');
+    }
+    return null;
+  }
   
   // Check for exact fragment matches
   for (const { fragment, fullName } of COLUMN_FRAGMENTS) {
@@ -1002,7 +1028,7 @@ async function mergeFeeds() {
   };
   
   try {
-    console.log('🚀 Starting enhanced RSS feed merger v2.1...');
+    console.log('🚀 Starting enhanced RSS feed merger v2.1.1...');
     
     // Fetch feeds
     console.log('\n📥 Fetching feeds...');
@@ -1058,6 +1084,7 @@ async function mergeFeeds() {
     // Process primary items
     console.log('\n🔄 Processing primary items...');
     const processedCores = new Set();
+    const usedSecondaryItems = new Set(); // Track used secondary items to prevent duplicates
     
     for (let i = 0; i < primaryItems.length; i++) {
       const item = primaryItems[i];
@@ -1082,6 +1109,17 @@ async function mergeFeeds() {
       const matchResult = findBestMatch(metadata, secondaryIndexes);
       
       if (matchResult) {
+        // Check if this secondary item was already used
+        const secondaryId = matchResult.match.metadata.guid || matchResult.match.metadata.link || matchResult.match.metadata.title;
+        if (usedSecondaryItems.has(secondaryId)) {
+          console.log('⚠️ Skipping - secondary item already matched: "' + matchResult.match.metadata.title + '"');
+          report.stats.duplicatesSkipped++;
+          continue;
+        }
+        
+        // Mark this secondary item as used
+        usedSecondaryItems.add(secondaryId);
+        
         // Clone and update the item
         const newItem = item.cloneNode(true);
         
@@ -1196,7 +1234,7 @@ async function mergeFeeds() {
 
 // Execute the merger
 if (require.main === module) {
-  console.log('🎬 Starting enhanced RSS feed merger v2.1...');
+  console.log('🎬 Starting enhanced RSS feed merger v2.1.1...');
   mergeFeeds()
     .then(() => console.log('🎉 Script completed successfully!'))
     .catch(err => {
