@@ -144,7 +144,7 @@ function extractCleanTitle(titleElement) {
   title = title.replace(PATTERNS.extraSpaces, ' ').trim();
   
   if (CONFIG.verboseLogging && title) {
-    console.log(`    Extracted title: "${title}"`);
+    console.log('    Extracted title: "' + title + '"');
   }
   
   return title;
@@ -1265,7 +1265,7 @@ function extractItemMetadata(item, feedType = 'unknown') {
   };
   
   if (CONFIG.verboseLogging) {
-    console.log(`  Extracting metadata from ${feedType} item...`);
+    console.log('  Extracting metadata from ' + feedType + ' item...');
   }
   
   // Extract title
@@ -1275,7 +1275,7 @@ function extractItemMetadata(item, feedType = 'unknown') {
     metadata.parsedTitle = parseColumnTitle(metadata.title);
     
     if (CONFIG.verboseLogging) {
-      console.log(`    Parsed title - Column: "${metadata.parsedTitle.columnName}", Core: "${metadata.parsedTitle.coreTitle}"`);
+      console.log('    Parsed title - Column: "' + metadata.parsedTitle.columnName + '", Core: "' + metadata.parsedTitle.coreTitle + '"');
     }
   }
   
@@ -1329,9 +1329,9 @@ function extractItemMetadata(item, feedType = 'unknown') {
               .map(word => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
               .join(' ');
             
-            if (CONFIG.verboseLogging) {
-              console.log(`    Extracted author: "${metadata.extractedAuthor}" from pattern: ${pattern}`);
-            }
+    if (CONFIG.verboseLogging) {
+      console.log('    Extracted author: "' + metadata.extractedAuthor + '" from pattern: ' + pattern);
+    }
             break;
           }
         }
@@ -1379,9 +1379,9 @@ function calculateMatchScore(primary, secondary) {
     const secondaryCore = normalizeText(secondary.parsedTitle.coreTitle, { stripColumnNames: false });
     
     if (CONFIG.verboseLogging) {
-      console.log(`    Comparing titles:`);
-      console.log(`      Primary core: "${primaryCore}"`);
-      console.log(`      Secondary core: "${secondaryCore}"`);
+      console.log('    Comparing titles:');
+      console.log('      Primary core: "' + primaryCore + '"');
+      console.log('      Secondary core: "' + secondaryCore + '"');
     }
     
     // Exact match check
@@ -1463,7 +1463,7 @@ function buildSecondaryIndexes(secondaryItems) {
     items: []
   };
   
-  console.log(`\n🔍 Building indexes for ${secondaryItems.length} secondary items...`);
+  console.log('\n🔍 Building indexes for ' + secondaryItems.length + ' secondary items...');
   
   for (const item of secondaryItems) {
     const metadata = extractItemMetadata(item, 'secondary');
@@ -1521,19 +1521,19 @@ function buildSecondaryIndexes(secondaryItems) {
     }
     
     if (CONFIG.verboseLogging) {
-      console.log(`  Indexed: "${metadata.title}"`);
-      console.log(`    Core: "${normalizedCore}"`);
-      console.log(`    Author: "${author}"`);
-      console.log(`    Column: "${column}"`);
+      console.log('  Indexed: "' + metadata.title + '"');
+      console.log('    Core: "' + normalizedCore + '"');
+      console.log('    Author: "' + author + '"');
+      console.log('    Column: "' + column + '"');
     }
   }
   
-  console.log(`📊 Built indexes:`);
-  console.log(`  - ${indexes.items.length} total items`);
-  console.log(`  - ${indexes.byNormalizedTitle.size} unique normalized titles`);
-  console.log(`  - ${indexes.byNormalizedCore.size} unique normalized core titles`);
-  console.log(`  - ${indexes.byAuthor.size} unique authors`);
-  console.log(`  - ${indexes.byColumn.size} unique columns`);
+  console.log('📊 Built indexes:');
+  console.log('  - ' + indexes.items.length + ' total items');
+  console.log('  - ' + indexes.byNormalizedTitle.size + ' unique normalized titles');
+  console.log('  - ' + indexes.byNormalizedCore.size + ' unique normalized core titles');
+  console.log('  - ' + indexes.byAuthor.size + ' unique authors');
+  console.log('  - ' + indexes.byColumn.size + ' unique columns');
   
   return indexes;
 }
@@ -1544,13 +1544,13 @@ function buildSecondaryIndexes(secondaryItems) {
 function findBestMatch(primaryMetadata, secondaryIndexes) {
   if (!primaryMetadata.title) return null;
   
-  console.log(`\n🔍 Finding match for: "${primaryMetadata.title}"`);
+  console.log('\n🔍 Finding match for: "' + primaryMetadata.title + '"');
   
   const normalizedFull = normalizeText(primaryMetadata.title, { stripColumnNames: false });
   const normalizedCore = normalizeText(primaryMetadata.parsedTitle?.coreTitle, { stripColumnNames: false });
   
-  console.log(`  Normalized full: "${normalizedFull}"`);
-  console.log(`  Normalized core: "${normalizedCore}"`);
+  console.log('  Normalized full: "' + normalizedFull + '"');
+  console.log('  Normalized core: "' + normalizedCore + '"');
   
   // Strategy 1: Exact match by normalized full title
   const exactFullMatches = secondaryIndexes.byNormalizedTitle.get(normalizedFull) || [];
@@ -1577,7 +1577,7 @@ function findBestMatch(primaryMetadata, secondaryIndexes) {
   // Strategy 3: Check if any secondary title matches our core (prefix removal)
   for (const [secondaryNormalized, candidates] of secondaryIndexes.byNormalizedTitle) {
     if (secondaryNormalized === normalizedCore) {
-      console.log(`  ✅ Found prefix-removed match! Secondary "${candidates[0].metadata.title}" matches our core`);
+    console.log('  ✅ Found prefix-removed match! Secondary "' + candidates[0].metadata.title + '" matches our core');
       return {
         match: candidates[0],
         score: calculateMatchScore(primaryMetadata, candidates[0].metadata),
@@ -1589,7 +1589,7 @@ function findBestMatch(primaryMetadata, secondaryIndexes) {
   // Strategy 4: Check if our full title matches any secondary core (reverse prefix removal)
   for (const candidate of secondaryIndexes.items) {
     if (candidate.normalizedCore === normalizedFull) {
-      console.log(`  ✅ Found reverse prefix match! Our full matches their core "${candidate.metadata.title}"`);
+      console.log('  ✅ Found reverse prefix match! Our full matches their core "' + candidate.metadata.title + '"');
       return {
         match: candidate,
         score: calculateMatchScore(primaryMetadata, candidate.metadata),
@@ -1599,7 +1599,7 @@ function findBestMatch(primaryMetadata, secondaryIndexes) {
   }
   
   // Strategy 5: Fuzzy matching with comprehensive scoring
-  console.log(`  🔄 Performing fuzzy matching across ${secondaryIndexes.items.length} items...`);
+  console.log('  🔄 Performing fuzzy matching across ' + secondaryIndexes.items.length + ' items...');
   
   let bestMatch = null;
   let bestScore = null;
@@ -1614,8 +1614,8 @@ function findBestMatch(primaryMetadata, secondaryIndexes) {
   }
   
   if (bestMatch) {
-    console.log(`  ✅ Found fuzzy match with score ${bestScore.total.toFixed(3)}`);
-    console.log(`    Secondary title: "${bestMatch.metadata.title}"`);
+    console.log('  ✅ Found fuzzy match with score ' + bestScore.total.toFixed(3));
+    console.log('    Secondary title: "' + bestMatch.metadata.title + '"');
     return {
       match: bestMatch,
       score: bestScore,
@@ -1639,7 +1639,7 @@ function reformatNewsmemoryLink(url) {
     return `https://thearknewspaper-ca.newsmemory.com?selDate=${date}&goTo=${page.padStart(2, '0')}&artid=${artid}&editionStart=The%20Ark`;
   }
   
-  console.warn(`Could not reformat URL: ${url}`);
+  console.log('Could not reformat URL: ' + url);
   return url;
 }
 
@@ -1694,7 +1694,7 @@ async function mergeFeeds() {
     report.stats.primaryItems = primaryItems.length;
     report.stats.secondaryItems = secondaryItems.length;
     
-    console.log(`📊 Found ${primaryItems.length} primary items, ${secondaryItems.length} secondary items`);
+    console.log('📊 Found ' + primaryItems.length + ' primary items, ' + secondaryItems.length + ' secondary items');
     
     // Build efficient indexes for secondary items
     const secondaryIndexes = buildSecondaryIndexes(secondaryItems);
@@ -1727,11 +1727,11 @@ async function mergeFeeds() {
       const metadata = extractItemMetadata(item, 'primary');
       
       if (!metadata.title) {
-        console.warn(`⚠️ Skipping item ${i + 1}: no title found`);
+        console.warn('⚠️ Skipping item ' + (i + 1) + ': no title found');
         continue;
       }
       
-      console.log(`\n--- Processing ${i + 1}/${primaryItems.length}: "${metadata.title}" ---`);
+      console.log('\n--- Processing ' + (i + 1) + '/' + primaryItems.length + ': "' + metadata.title + '" ---');
       
       // Check for duplicates based on core title
       const normalizedCore = normalizeText(metadata.parsedTitle?.coreTitle, { stripColumnNames: false });
@@ -1792,7 +1792,7 @@ async function mergeFeeds() {
           link: cleanLink
         });
         
-        console.log(`✅ Matched using ${matchResult.strategy} strategy`);
+        console.log('✅ Matched using ' + matchResult.strategy + ' strategy');
       } else {
         report.stats.noMatches++;
         report.unmatched.push({
@@ -1819,21 +1819,21 @@ async function mergeFeeds() {
     report.durationMs = endTime - startTime;
     report.finalItemCount = totalMatched;
     
-    console.log(`\n📈 MERGE COMPLETE`);
-    console.log(`⏱️  Duration: ${(report.durationMs / 1000).toFixed(2)}s`);
-    console.log(`📝 Final feed: ${totalMatched} items`);
-    console.log(`🎯 Exact matches: ${report.stats.exactMatches}`);
-    console.log(`🔍 Fuzzy matches: ${report.stats.fuzzyMatches}`);
-    console.log(`❌ No matches: ${report.stats.noMatches}`);
-    console.log(`⚠️  Duplicates skipped: ${report.stats.duplicatesSkipped}`);
+    console.log('\n📈 MERGE COMPLETE');
+    console.log('⏱️  Duration: ' + (report.durationMs / 1000).toFixed(2) + 's');
+    console.log('📝 Final feed: ' + totalMatched + ' items');
+    console.log('🎯 Exact matches: ' + report.stats.exactMatches);
+    console.log('🔍 Fuzzy matches: ' + report.stats.fuzzyMatches);
+    console.log('❌ No matches: ' + report.stats.noMatches);
+    console.log('⚠️  Duplicates skipped: ' + report.stats.duplicatesSkipped);
     
     // Generate detailed report
     if (CONFIG.generateReport) {
       fs.writeFileSync(CONFIG.reportFile, JSON.stringify(report, null, 2));
-      console.log(`📊 Detailed report saved to ${CONFIG.reportFile}`);
+      console.log('📊 Detailed report saved to ' + CONFIG.reportFile);
     }
     
-    console.log(`\n📄 Merged RSS feed saved to ${CONFIG.outputFile}`);
+    console.log('\n📄 Merged RSS feed saved to ' + CONFIG.outputFile);
     
     return resultXml;
     
