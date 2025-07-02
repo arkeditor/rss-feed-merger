@@ -1,11 +1,11 @@
 /**
- * Enhanced RSS Feed Merger - Jump Page Filtering Version v2.1.1
+ * Enhanced RSS Feed Merger - Comma-Based Jump Page Filtering Version v2.1.3
  * 
- * Key improvements over v2.1:
- * - Jump page filtering - excludes "from page" continuations
- * - Duplicate secondary item prevention
- * - Enhanced continuation detection (from, continued, cont.)
- * - Better story start vs. continuation differentiation
+ * Key improvements over v2.1.2:
+ * - Simplified to comma-based jump page detection (", from" pattern only)
+ * - Jump pages always have commas, legitimate titles never do
+ * - Clean filtering: "Encounters, from page" vs "Notes from an Appraiser"
+ * - Maintains all duplicate prevention and matching capabilities
  */
 
 const https = require('https');
@@ -223,20 +223,14 @@ function wordOverlapSimilarity(str1, str2) {
 }
 
 /**
- * Enhanced fragment detection with jump page filtering
+ * Enhanced fragment detection with comma-based jump page filtering
  */
 function detectFragment(shortTitle, longTitle) {
   if (!shortTitle || !longTitle) return 0;
   
-  // Skip jump pages - look for continuation indicators
+  // Skip jump pages - only comma-based continuation patterns (jump pages always have commas)
   const shortLower = shortTitle.toLowerCase();
-  if (shortLower.includes('from page') || 
-      shortLower.includes('from pg') ||
-      shortLower.includes(', from') ||
-      shortLower.includes(' from ') ||
-      shortLower.endsWith('from') ||
-      shortLower.includes('continued') ||
-      shortLower.includes('cont.')) {
+  if (shortLower.includes(', from')) {
     if (CONFIG.verboseLogging) {
       console.log('    Skipping jump page in fragment detection: "' + shortTitle + '"');
     }
@@ -272,19 +266,15 @@ function detectFragment(shortTitle, longTitle) {
 }
 
 /**
- * Enhanced column fragment detection with jump page filtering
+ * Enhanced column fragment detection with comma-based jump page filtering
  */
 function detectColumnFragment(title) {
   if (!title) return null;
   
   const normalizedTitle = title.toLowerCase().replace(PATTERNS.trailingPunctuation, '').trim();
   
-  // Skip jump pages - fragments followed by "from" indicate continuation pages
-  if (normalizedTitle.includes('from page') || 
-      normalizedTitle.includes('from pg') ||
-      normalizedTitle.includes(', from') ||
-      normalizedTitle.includes(' from ') ||
-      normalizedTitle.endsWith('from')) {
+  // Skip jump pages - only comma-based continuation patterns (jump pages always have commas)
+  if (normalizedTitle.includes(', from')) {
     if (CONFIG.verboseLogging) {
       console.log('    Skipping jump page fragment: "' + title + '"');
     }
@@ -1028,7 +1018,7 @@ async function mergeFeeds() {
   };
   
   try {
-    console.log('🚀 Starting enhanced RSS feed merger v2.1.1...');
+    console.log('🚀 Starting enhanced RSS feed merger v2.1.3...');
     
     // Fetch feeds
     console.log('\n📥 Fetching feeds...');
@@ -1234,7 +1224,7 @@ async function mergeFeeds() {
 
 // Execute the merger
 if (require.main === module) {
-  console.log('🎬 Starting enhanced RSS feed merger v2.1.1...');
+  console.log('🎬 Starting enhanced RSS feed merger v2.1.2...');
   mergeFeeds()
     .then(() => console.log('🎉 Script completed successfully!'))
     .catch(err => {
