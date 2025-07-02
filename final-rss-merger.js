@@ -67,11 +67,11 @@ const TITLE_NORMALIZATIONS = new Map([
   ['st.', 'street'],
   ['rd.', 'road'],
   ['ave.', 'avenue'],
-  [''', "'"],
-  ['"', '"'],
-  ['"', '"'],
-  ['–', '-'],
-  ['—', '-']
+  ['\u2019', "'"], // right single quotation mark
+  ['\u201c', '"'], // left double quotation mark
+  ['\u201d', '"'], // right double quotation mark
+  ['\u2013', '-'], // en dash
+  ['\u2014', '-']  // em dash
 ]);
 
 // Compiled regex patterns for performance
