@@ -1032,6 +1032,30 @@ async function mergeFeeds() {
     const primaryDoc = parser.parseFromString(primaryFeedXML, 'text/xml');
     const secondaryDoc = parser.parseFromString(secondaryFeedXML, 'text/xml');
     
+    // Validate parsed documents
+    const checkParseError = (doc, feedName, feedXML) => {
+      const parserError = doc.getElementsByTagName("parsererror");
+      if (parserError.length > 0) {
+        console.error('❌ XML Parse Error in ' + feedName + ':');
+        console.error(parserError[0].textContent);
+        console.log('\n📄 First 500 chars of XML:');
+        console.log(feedXML.substring(0, 500));
+        console.log('\n📄 Around error position (col 15370):');
+        console.log(feedXML.substring(15350, 15450));
+        throw new Error('Failed to parse ' + feedName + ' XML');
+      }
+      
+      if (!doc || !doc.documentElement) {
+        console.error('❌ Invalid document structure in ' + feedName);
+        console.log('\n📄 First 500 chars of XML:');
+        console.log(feedXML.substring(0, 500));
+        throw new Error('Invalid XML document for ' + feedName);
+      }
+    };
+    
+    checkParseError(primaryDoc, 'primary feed', primaryFeedXML);
+    checkParseError(secondaryDoc, 'secondary feed', secondaryFeedXML);
+    
     // Validate XML structure
     const primaryChannel = primaryDoc.getElementsByTagName('channel')[0];
     const secondaryChannel = secondaryDoc.getElementsByTagName('channel')[0];
@@ -1224,7 +1248,7 @@ async function mergeFeeds() {
 
 // Execute the merger
 if (require.main === module) {
-  console.log('🎬 Starting enhanced RSS feed merger v2.1.2...');
+  console.log('🎬 Starting enhanced RSS feed merger v2.1.3...');
   mergeFeeds()
     .then(() => console.log('🎉 Script completed successfully!'))
     .catch(err => {
